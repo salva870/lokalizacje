@@ -16,6 +16,22 @@ npm run dev
 docker compose up -d --build
 ```
 
+## Wazne: `SUPABASE_SERVICE_ROLE_KEY` (blad przy dodawaniu lokalizacji)
+
+Jesli widzisz komunikat **„Brak SUPABASE_SERVICE_ROLE_KEY”**, aplikacja ma ustawione `SUPABASE_URL` i `SUPABASE_ANON_KEY`, ale **nie ma klucza serwisowego** potrzebnego do zapisow w bazie (INSERT do `locations`, `stock_movements` itd.).
+
+1. W Supabase: **Project Settings → API**.
+2. W sekcji **Project API keys** skopiuj **`service_role` (secret)** — to **nie** jest ten sam klucz co „publishable” / anon.
+3. Na serwerze w pliku `/root/lokalizacje/.env` ustaw jedna linie (bez cudzyslowow, bez spacji wokol `=`):
+
+   `SUPABASE_SERVICE_ROLE_KEY=tu_wklej_service_role`
+
+4. Przeladuj kontener: `cd /root/lokalizacje && docker compose up -d`
+
+**Bezpieczenstwo:** tego klucza **nigdy** nie wkladaj do kodu frontendu, repozytorium publicznego ani do zmiennych `NEXT_PUBLIC_*`. Tylko backend / Docker na serwerze.
+
+---
+
 ## Co musisz wyklikac w Supabase
 
 1. Wejdz do projektu Supabase: `qxrmxhjzrshogtaqcasy`.
