@@ -1,0 +1,23 @@
+services:
+  lokalizacje-app:
+    container_name: lokalizacje-app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      AUTH_SECRET: ${AUTH_SECRET}
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      NEXT_PUBLIC_APP_NAME: Lokalizacje Towaru
+    ports:
+      - "3010:3000"
+    networks:
+      - docker_default
+
+networks:
+  docker_default:
+    external: true
