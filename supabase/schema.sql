@@ -50,7 +50,28 @@ create index if not exists idx_stock_movements_to_location_sku
 create index if not exists idx_stock_movements_from_location_sku
   on stock_movements (from_location_code, sku);
 
-drop materialized view if exists stock_current;
+-- Poprzednie wersje skryptu uzywaly DROP MATERIALIZED VIEW; obecnie stock_current to VIEW.
+-- DROP MATERIALIZED VIEW na zwyklym widoku konczy sie bledem 42809 — stad warunkowe usuniecie.
+do $$
+declare
+  rk "char";
+begin
+  select c.relkind
+  into rk
+  from pg_catalog.pg_class c
+  join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public'
+    and c.relname = 'stock_current';
+
+  if rk is null then
+    return;
+  elsif rk = 'm'::"char" then
+    execute 'drop materialized view public.stock_current cascade';
+  elsif rk = 'v'::"char" then
+    execute 'drop view public.stock_current cascade';
+  end if;
+end
+$$;
 
 create view stock_current as
 select
