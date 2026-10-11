@@ -12,9 +12,20 @@ import {
 } from "@/lib/locationStockView";
 import { filterStockModelGroups } from "@/lib/skuLookup";
 import { buildLocationTypeMap } from "@/lib/stockClassification";
+import { AddDuplicateConfirmModal } from "@/app/components/AddDuplicateConfirmModal";
+import { ModelLogButton } from "@/app/components/ModelLogButton";
 import { StockQtyDisplay } from "@/app/components/StockQtyDisplay";
+import { findModelDuplicateAddRisks, type ModelDuplicateAddRisk } from "@/lib/addDuplicateGuard";
 import { groupStockByModel, summarizeStockRows, type StockModelGroup, type StockRow } from "@/lib/stockViews";
 import type { Location, Zone } from "@/lib/types";
+import {
+  ReplenishmentPanel,
+  type ReplenishmentLineState,
+  type ReplenishmentLineStatus,
+} from "@/app/components/ReplenishmentPanel";
+import type { ReplenishmentTransfer } from "@/lib/replenishment";
+
+const REPLENISH_STATUS_STORAGE_KEY = "loc-replenishment-line-status";
 
 type StockPanelLocation = Pick<Location, "code" | "name" | "parentZone" | "sortOrder" | "locationType" | "isActive">;
 
@@ -32,7 +43,29 @@ type StockPanelProps = {
   locations: StockPanelLocation[];
   onClose: () => void;
   onStockChanged?: () => void;
+  onOpenLocationPreview?: (locationCode: string, models: string[]) => void;
 };
+
+function readReplenishmentStatusMap(): Record<string, ReplenishmentLineStatus> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(REPLENISH_STATUS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, ReplenishmentLineStatus>;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeReplenishmentStatusMap(map: Record<string, ReplenishmentLineStatus>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(REPLENISH_STATUS_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // ignore quota errors
+  }
+}
 
 type OrderRow = { locationCode: string; model: string; sortOrder: number };
 
@@ -45,8 +78,8 @@ function toggleSetValue(setter: Dispatch<SetStateAction<Set<string>>>, key: stri
   });
 }
 
-export function StockPanel({ stock, locations, onClose, onStockChanged }: StockPanelProps) {
-  const [tab, setTab] = useState<"list" | "byLocation">("list");
+export function StockPanel({ stock, locations, onClose, onStockChanged, onOpenLocationPreview }: StockPanelProps) {
+  const [tab, setTab] = useState<"list" | "byLocation" | "replenish">("list");
   const [locationZoneTab, setLocationZoneTab] = useState<LocationStockBucket>("SKLEP");
   const [orderRows, setOrderRows] = useState<OrderRow[]>([]);
   const [reorderLocation, setReorderLocation] = useState<string | null>(null);
@@ -59,7 +92,119 @@ export function StockPanel({ stock, locations, onClose, onStockChanged }: StockP
   const [expandedLocations, setExpandedLocations] = useState<Set<string>>(() => new Set());
   const [expandedLocationModels, setExpandedLocationModels] = useState<Set<string>>(() => new Set());
   const [editMode, setEditMode] = useState(false);
+  const [duplicateModalOpen, setDuplicateModalOpen] = useState(false);
+  const [duplicateRisks, setDuplicateRisks] = useState<ModelDuplicateAddRisk[]>([]);
+  const [duplicateLocation, setDuplicateLocation] = useState("");
+  const [duplicateBusy, setDuplicateBusy] = useState(false);
+  const duplicatePendingRef = useRef<null | (() => Promise<void>)>(null);
   const busyRef = useRef(false);
+  const [replenishLines, setReplenishLines] = useState<ReplenishmentLineState[]>([]);
+  const [replenishModelTargets, setReplenishModelTargets] = useState<Array<{ model: string; targetQty: number }>>([]);
+  const [replenishLoading, setReplenishLoading] = useState(false);
+  const [replenishBusyId, setReplenishBusyId] = useState<string | null>(null);
+
+  const loadReplenishmentPlan = useCallback(async () => {
+    setReplenishLoading(true);
+    try {
+      const response = await fetch("/api/replenishment/plan");
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setSaveMessage(typeof data.error === "string" ? data.error : "Nie udalo sie pobrac planu uzupelnienia.");
+        setReplenishLines([]);
+        setReplenishModelTargets([]);
+        return;
+      }
+      const statusMap = readReplenishmentStatusMap();
+      const transfers = Array.isArray(data.transfers) ? (data.transfers as ReplenishmentTransfer[]) : [];
+      const lines: ReplenishmentLineState[] = transfers.map((line) => ({
+        ...line,
+        status: statusMap[line.id] === "picked" || statusMap[line.id] === "done" ? statusMap[line.id]! : "pending",
+      }));
+      setReplenishLines(lines);
+      setReplenishModelTargets(Array.isArray(data.modelTargets) ? data.modelTargets : []);
+    } catch {
+      setSaveMessage("Blad polaczenia przy pobieraniu planu uzupelnienia.");
+      setReplenishLines([]);
+      setReplenishModelTargets([]);
+    } finally {
+      setReplenishLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab !== "replenish") return;
+    void loadReplenishmentPlan();
+  }, [tab, loadReplenishmentPlan]);
+
+  const persistReplenishStatus = useCallback((lines: ReplenishmentLineState[]) => {
+    const map: Record<string, ReplenishmentLineStatus> = {};
+    for (const line of lines) {
+      if (line.status !== "pending") map[line.id] = line.status;
+    }
+    writeReplenishmentStatusMap(map);
+  }, []);
+
+  const markReplenishPicked = useCallback(
+    (id: string) => {
+      setReplenishLines((prev) => {
+        const next = prev.map((line) => (line.id === id ? { ...line, status: "picked" as const } : line));
+        persistReplenishStatus(next);
+        return next;
+      });
+    },
+    [persistReplenishStatus],
+  );
+
+  const confirmReplenishMove = useCallback(
+    async (line: ReplenishmentTransfer) => {
+      setReplenishBusyId(line.id);
+      setSaveMessage(null);
+      try {
+        const response = await fetch("/api/movements", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            movementType: "MOVE",
+            sku: line.sku,
+            qty: line.qty,
+            fromLocationCode: line.fromLocationCode,
+            toLocationCode: line.toLocationCode,
+          }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          setSaveMessage(typeof data.error === "string" ? data.error : "Nie udalo sie zapisac przeniesienia.");
+          return;
+        }
+        setReplenishLines((prev) => {
+          const next = prev.map((row) => (row.id === line.id ? { ...row, status: "done" as const } : row));
+          persistReplenishStatus(next);
+          return next;
+        });
+        setSaveMessage(`Przeniesiono ${line.qty} szt. ${line.sku} na ${line.toLocationCode}.`);
+        onStockChanged?.();
+      } finally {
+        setReplenishBusyId(null);
+      }
+    },
+    [onStockChanged, persistReplenishStatus],
+  );
+
+  const saveReplenishModelTarget = useCallback(
+    async (model: string, targetQty: number) => {
+      const response = await fetch(`/api/models/${encodeURIComponent(model)}/display-target`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetQty }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(typeof data.error === "string" ? data.error : "Nie udalo sie zapisac celu ekspozycji.");
+      }
+      await loadReplenishmentPlan();
+    },
+    [loadReplenishmentPlan],
+  );
 
   useEffect(() => {
     void fetch("/api/model-order")
@@ -254,6 +399,14 @@ export function StockPanel({ stock, locations, onClose, onStockChanged }: StockP
       body: JSON.stringify(payload),
     });
     const data = await response.json().catch(() => ({}));
+    if (response.status === 409 && data.code === "DUPLICATE_ADD_MODEL_QTY") {
+      setDuplicateRisks((data.risks as ModelDuplicateAddRisk[]) ?? []);
+      setDuplicateLocation(typeof data.locationCode === "string" ? data.locationCode : String(payload.toLocationCode ?? ""));
+      duplicatePendingRef.current = () =>
+        postStockMovement({ ...payload, confirmDuplicateAdd: true });
+      setDuplicateModalOpen(true);
+      throw new Error("DUPLICATE_ADD_BLOCKED");
+    }
     if (!response.ok) {
       throw new Error(typeof data.error === "string" ? data.error : "Nie udalo sie zapisac zmiany.");
     }
@@ -303,6 +456,27 @@ export function StockPanel({ stock, locations, onClose, onStockChanged }: StockP
               : `Zdjeto 1 szt. ${sku} z ${locationCode}.`,
           );
         } else {
+          const risks = findModelDuplicateAddRisks(stock, locationCode, [{ sku, qty: 1 }]);
+          if (risks.length > 0) {
+            setDuplicateRisks(risks);
+            setDuplicateLocation(locationCode);
+            duplicatePendingRef.current = async () => {
+              await postStockMovement({
+                movementType: "ADD",
+                sku,
+                qty: 1,
+                toLocationCode: locationCode,
+                confirmDuplicateAdd: true,
+              });
+              if (!orderedModels.includes(model)) {
+                await saveOrder(locationCode, [...orderedModels, model], true);
+              }
+              setSaveMessage(`Dodano 1 szt. ${sku} na ${locationCode}.`);
+              onStockChanged?.();
+            };
+            setDuplicateModalOpen(true);
+            return;
+          }
           await postStockMovement({
             movementType: "ADD",
             sku,
@@ -316,13 +490,14 @@ export function StockPanel({ stock, locations, onClose, onStockChanged }: StockP
         }
         onStockChanged?.();
       } catch (error) {
+        if (error instanceof Error && error.message === "DUPLICATE_ADD_BLOCKED") return;
         setSaveMessage(error instanceof Error ? error.message : "Nie udalo sie zapisac zmiany.");
       } finally {
         busyRef.current = false;
         setBusyKey(null);
       }
     },
-    [onStockChanged, postStockMovement, saveOrder],
+    [onStockChanged, postStockMovement, saveOrder, stock],
   );
 
   return (
@@ -356,23 +531,46 @@ export function StockPanel({ stock, locations, onClose, onStockChanged }: StockP
         <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-3">
         {saveMessage ? <p className="rounded-xl bg-blue-50 px-3 py-2 text-sm text-blue-800">{saveMessage}</p> : null}
 
-        <div className={`grid grid-cols-2 gap-2 rounded-2xl border border-blue-100 bg-blue-50/60 p-2 ${saveMessage ? "mt-3" : ""}`}>
+        <div className={`grid grid-cols-3 gap-2 rounded-2xl border border-blue-100 bg-blue-50/60 p-2 ${saveMessage ? "mt-3" : ""}`}>
           <button
             type="button"
-            className={`rounded-2xl p-3 text-sm font-semibold ${tab === "list" ? "bg-white shadow" : "text-blue-900"}`}
+            className={`rounded-2xl p-2 text-xs font-semibold sm:p-3 sm:text-sm ${tab === "list" ? "bg-white shadow" : "text-blue-900"}`}
             onClick={() => setTab("list")}
           >
             Po modelach
           </button>
           <button
             type="button"
-            className={`rounded-2xl p-3 text-sm font-semibold ${tab === "byLocation" ? "bg-white shadow" : "text-blue-900"}`}
+            className={`rounded-2xl p-2 text-xs font-semibold sm:p-3 sm:text-sm ${tab === "byLocation" ? "bg-white shadow" : "text-blue-900"}`}
             onClick={() => setTab("byLocation")}
           >
             Na lokalizacjach
           </button>
+          <button
+            type="button"
+            className={`rounded-2xl p-2 text-xs font-semibold sm:p-3 sm:text-sm ${tab === "replenish" ? "bg-white shadow" : "text-violet-900"}`}
+            onClick={() => setTab("replenish")}
+          >
+            Uzupelnianie
+          </button>
         </div>
 
+        {tab === "replenish" ? (
+          <ReplenishmentPanel
+            lines={replenishLines}
+            modelTargets={replenishModelTargets}
+            loading={replenishLoading}
+            busyId={replenishBusyId}
+            onRefresh={() => void loadReplenishmentPlan()}
+            onMarkPicked={markReplenishPicked}
+            onConfirmMove={(line) => void confirmReplenishMove(line)}
+            onSaveModelTarget={saveReplenishModelTarget}
+            onOpenLocationPreview={onOpenLocationPreview}
+          />
+        ) : null}
+
+        {tab !== "replenish" ? (
+        <>
         {tab === "byLocation" ? (
           <div className="mt-3 grid grid-cols-3 gap-1.5 rounded-2xl border border-blue-100 bg-blue-50/60 p-1.5">
             {(["SKLEP", "ZAPLECZE", "OTHER"] as LocationStockBucket[]).map((bucket) => (
@@ -435,10 +633,11 @@ export function StockPanel({ stock, locations, onClose, onStockChanged }: StockP
               filteredModelGroups.map((group) => {
                 const collapsed = !expandedModels.has(group.model);
                 return (
-                <div key={group.model} className="rounded-2xl border border-blue-100 p-3">
+                <div key={group.model} className="relative rounded-2xl border border-blue-100 p-3">
+                  <ModelLogButton model={group.model} className="absolute right-2 top-2 z-10" />
                   <button
                     type="button"
-                    className="flex w-full flex-wrap items-center justify-between gap-2 text-left"
+                    className="flex w-full flex-wrap items-center justify-between gap-2 pr-14 text-left"
                     onClick={() => toggleSetValue(setExpandedModels, group.model)}
                     aria-expanded={!collapsed}
                   >
@@ -613,11 +812,14 @@ export function StockPanel({ stock, locations, onClose, onStockChanged }: StockP
                           void moveModel(locationCode, models, fromIndex, index);
                           setDragModel(null);
                         }}
-                        className={`rounded-xl bg-blue-50/60 px-2 py-1.5 ${reorderOpen ? "border border-dashed border-blue-300" : ""}`}
+                        className={`relative rounded-xl bg-blue-50/60 px-2 py-1.5 ${reorderOpen ? "border border-dashed border-blue-300" : ""}`}
                       >
+                        {!reorderOpen ? (
+                          <ModelLogButton model={group.model} className="absolute right-1 top-1 z-10" />
+                        ) : null}
                         <button
                           type="button"
-                          className="flex w-full flex-wrap items-center justify-between gap-2 text-left"
+                          className={`flex w-full flex-wrap items-center justify-between gap-2 text-left ${!reorderOpen ? "pr-12" : ""}`}
                           onClick={() => toggleSetValue(setExpandedLocationModels, locationModelKey)}
                           aria-expanded={!modelCollapsed}
                         >
@@ -771,8 +973,40 @@ export function StockPanel({ stock, locations, onClose, onStockChanged }: StockP
             })
           )}
         </div>
+        </>
+        ) : null}
         </div>
       </div>
+
+      <AddDuplicateConfirmModal
+        open={duplicateModalOpen}
+        locationCode={duplicateLocation}
+        risks={duplicateRisks}
+        busy={duplicateBusy}
+        onCancel={() => {
+          setDuplicateModalOpen(false);
+          duplicatePendingRef.current = null;
+        }}
+        onConfirm={() => {
+          const run = duplicatePendingRef.current;
+          if (!run) {
+            setDuplicateModalOpen(false);
+            return;
+          }
+          setDuplicateBusy(true);
+          void run()
+            .catch((error) => {
+              if (error instanceof Error && error.message !== "DUPLICATE_ADD_BLOCKED") {
+                setSaveMessage(error.message);
+              }
+            })
+            .finally(() => {
+              setDuplicateBusy(false);
+              duplicatePendingRef.current = null;
+              setDuplicateModalOpen(false);
+            });
+        }}
+      />
     </div>
   );
 }

@@ -17,14 +17,26 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Niepoprawne dane" }, { status: 400 });
     }
 
-    const results = await getPickStatusByReferences(parsed.data.references);
-    const references = Object.fromEntries(results.map((entry) => [entry.referenceNo, entry]));
+    const entries = await getPickStatusByReferences(parsed.data.references);
+    const references: Record<
+      string,
+      { netQty: number; sku: string; locations: Array<{ locationCode: string; netQty: number }> }
+    > = {};
+
+    for (const entry of entries) {
+      references[entry.referenceNo] = {
+        netQty: entry.netQty,
+        sku: entry.sku,
+        locations: entry.locations,
+      };
+    }
 
     return NextResponse.json({ ok: true, references });
   } catch (error) {
     await logServerError("POST /api/integration/pick-status", error);
     const message = error instanceof Error ? error.message : "Blad statusu zbierania";
-    const status = message === "Unauthorized" ? 401 : message === "Integration API disabled" ? 503 : 400;
+    const status =
+      message === "Unauthorized" ? 401 : message === "Integration API disabled" ? 503 : 400;
     return NextResponse.json({ error: message }, { status });
   }
 }

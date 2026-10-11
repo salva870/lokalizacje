@@ -113,6 +113,15 @@ export function stockRowsForModel(
   return groupStockByModel(stock, undefined, options).find((group) => group.model === normalized) ?? null;
 }
 
+export function skuQtyAtLocation(stockRows: StockRow[], locationCode: string, sku: string): number {
+  const loc = locationCode.trim().toUpperCase();
+  const targetSku = sku.trim().toUpperCase();
+  if (!loc || !targetSku) return 0;
+  return stockRows
+    .filter((row) => row.locationCode.toUpperCase() === loc && row.sku.toUpperCase() === targetSku)
+    .reduce((sum, row) => sum + row.qty, 0);
+}
+
 export function modelQtyAtLocation(
   stockRows: StockRow[],
   locationCode: string,

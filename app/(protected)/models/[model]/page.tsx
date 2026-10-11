@@ -5,7 +5,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { StockQtyDisplay, DamagedStockIcon } from "@/app/components/StockQtyDisplay";
 import { buildLocationTypeMap } from "@/lib/stockClassification";
+import { ModelLogButton } from "@/app/components/ModelLogButton";
 import { parseSkuModel } from "@/lib/skuModel";
+import { AddDuplicateConfirmModal } from "@/app/components/AddDuplicateConfirmModal";
+import { findModelDuplicateAddRisks, type ModelDuplicateAddRisk } from "@/lib/addDuplicateGuard";
 import { stockRowsForModel, type StockRow } from "@/lib/stockViews";
 import type { Location } from "@/lib/types";
 
@@ -21,6 +24,11 @@ export default function ModelStockPage() {
   const [editMode, setEditMode] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [duplicateModalOpen, setDuplicateModalOpen] = useState(false);
+  const [duplicateRisks, setDuplicateRisks] = useState<ModelDuplicateAddRisk[]>([]);
+  const [duplicateLocation, setDuplicateLocation] = useState("");
+  const [duplicateBusy, setDuplicateBusy] = useState(false);
+  const duplicatePendingRef = useRef<null | (() => Promise<void>)>(null);
   const busyRef = useRef(false);
 
   const locationTypes = useMemo(() => buildLocationTypeMap(locations), [locations]);
@@ -67,8 +75,18 @@ export default function ModelStockPage() {
   );
 
   const changeQty = useCallback(
-    async (locationCode: string, sku: string, currentQty: number, delta: number) => {
+    async (locationCode: string, sku: string, currentQty: number, delta: number, confirmDuplicateAdd = false) => {
       if (busyRef.current) return;
+      if (delta > 0 && !confirmDuplicateAdd) {
+        const risks = findModelDuplicateAddRisks(stock, locationCode, [{ sku, qty: 1 }]);
+        if (risks.length > 0) {
+          setDuplicateRisks(risks);
+          setDuplicateLocation(locationCode);
+          duplicatePendingRef.current = () => changeQty(locationCode, sku, currentQty, delta, true);
+          setDuplicateModalOpen(true);
+          return;
+        }
+      }
       const key = `${locationCode}:${sku}`;
       busyRef.current = true;
       setBusyKey(key);
@@ -80,10 +98,23 @@ export default function ModelStockPage() {
           body: JSON.stringify(
             delta < 0
               ? { movementType: "REMOVE", sku, qty: 1, fromLocationCode: locationCode }
-              : { movementType: "ADD", sku, qty: 1, toLocationCode: locationCode },
+              : {
+                  movementType: "ADD",
+                  sku,
+                  qty: 1,
+                  toLocationCode: locationCode,
+                  confirmDuplicateAdd: confirmDuplicateAdd || undefined,
+                },
           ),
         });
         const data = await response.json().catch(() => ({}));
+        if (response.status === 409 && data.code === "DUPLICATE_ADD_MODEL_QTY") {
+          setDuplicateRisks((data.risks as ModelDuplicateAddRisk[]) ?? []);
+          setDuplicateLocation(locationCode);
+          duplicatePendingRef.current = () => changeQty(locationCode, sku, currentQty, delta, true);
+          setDuplicateModalOpen(true);
+          return;
+        }
         if (!response.ok) {
           throw new Error(typeof data.error === "string" ? data.error : "Nie udalo sie zapisac zmiany.");
         }
@@ -96,7 +127,7 @@ export default function ModelStockPage() {
         setBusyKey(null);
       }
     },
-    [],
+    [stock],
   );
 
   if (!ready) {
@@ -113,9 +144,12 @@ export default function ModelStockPage() {
         <header className="rounded-xl bg-white p-4 shadow">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h1 className="text-xl font-semibold text-blue-900">Model {modelCode}</h1>
-            <Link className="rounded-lg border border-blue-200 px-3 py-1.5 text-sm text-blue-800 hover:bg-blue-50" href="/">
-              Panel skanowania
-            </Link>
+            <div className="flex flex-wrap items-center gap-2">
+              <ModelLogButton model={modelCode} />
+              <Link className="rounded-lg border border-blue-200 px-3 py-1.5 text-sm text-blue-800 hover:bg-blue-50" href="/">
+                Panel skanowania
+              </Link>
+            </div>
           </div>
           <p className="mt-2 text-sm text-blue-700">Rozmiary, lokalizacje i ilosci dla tego modelu.</p>
           <button
@@ -217,6 +251,30 @@ export default function ModelStockPage() {
           </>
         )}
       </div>
+
+      <AddDuplicateConfirmModal
+        open={duplicateModalOpen}
+        locationCode={duplicateLocation}
+        risks={duplicateRisks}
+        busy={duplicateBusy}
+        onCancel={() => {
+          setDuplicateModalOpen(false);
+          duplicatePendingRef.current = null;
+        }}
+        onConfirm={() => {
+          const run = duplicatePendingRef.current;
+          if (!run) {
+            setDuplicateModalOpen(false);
+            return;
+          }
+          setDuplicateBusy(true);
+          void run().finally(() => {
+            setDuplicateBusy(false);
+            duplicatePendingRef.current = null;
+            setDuplicateModalOpen(false);
+          });
+        }}
+      />
     </main>
   );
 }

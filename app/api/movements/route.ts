@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getSession, requireRole } from "@/lib/auth";
-import { applyMovement, getRestoreSuggestions } from "@/lib/data";
+import { findDuplicateAddRisks } from "@/lib/addDuplicateGuard";
+import { applyMovement, getCurrentStock, getRestoreSuggestions } from "@/lib/data";
 
 const movementSchema = z.object({
   movementType: z.enum([
@@ -17,6 +18,7 @@ const movementSchema = z.object({
   fromLocationCode: z.string().max(64).optional(),
   toLocationCode: z.string().max(64).optional(),
   referenceNo: z.string().max(120).optional(),
+  confirmDuplicateAdd: z.boolean().optional(),
 });
 
 export async function POST(request: Request) {
@@ -45,9 +47,36 @@ export async function POST(request: Request) {
       });
     }
 
+    if (parsed.data.movementType === "ADD") {
+      const toLocation = parsed.data.toLocationCode?.trim();
+      const sku = parsed.data.sku.trim();
+      const qty = parsed.data.qty ?? 1;
+      if (toLocation && sku && qty > 0 && !parsed.data.confirmDuplicateAdd) {
+        const stock = await getCurrentStock();
+        const risks = findDuplicateAddRisks(stock, toLocation, [{ sku, qty }]);
+        if (risks.length > 0) {
+          return NextResponse.json(
+            {
+              error:
+                "Dodajesz tyle samo sztuk tego kodu produktu, ile juz jest na tej lokalizacji — mozliwe podwojenie stanu.",
+              code: "DUPLICATE_ADD_MODEL_QTY",
+              locationCode: toLocation.toUpperCase(),
+              risks,
+            },
+            { status: 409 },
+          );
+        }
+      }
+    }
+
     const movement = await applyMovement({
       operatorId: session.sub,
-      ...parsed.data,
+      movementType: parsed.data.movementType,
+      sku: parsed.data.sku,
+      qty: parsed.data.qty,
+      fromLocationCode: parsed.data.fromLocationCode,
+      toLocationCode: parsed.data.toLocationCode,
+      referenceNo: parsed.data.referenceNo,
     });
     return NextResponse.json({ movement });
   } catch (error) {

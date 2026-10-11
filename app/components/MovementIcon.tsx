@@ -104,8 +104,8 @@ export const movementVisuals: Record<MovementType, MovementVisual> = {
 export const operationVisuals: Record<OperationMode, MovementVisual> = {
   ...movementVisuals,
   RECONCILE: {
-    label: "Aktualizuj stan",
-    hint: "Nadpisuje caly stan i kolejnosc na lokalizacji",
+    label: "Uzupelnij/nadpisz stan",
+    hint: "Uzupelnij ekspozycje z zaplecza (przeniesienie)",
     icon: (
       <svg {...svgProps} aria-hidden>
         <path d="M4 7h16M4 12h10M4 17h14" />

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 import { LocationOrderPanel } from "@/app/components/LocationOrderPanel";
+import { StockAnomalyAdminPanel } from "@/app/components/StockAnomalyAdminPanel";
 import {
   defaultLocationTypeForZone,
   defaultLocationTypeLabels,
@@ -33,6 +34,8 @@ export default function AdminPage() {
   const [newLocationZone, setNewLocationZone] = useState<Zone>("SKLEP");
   const [newLocationType, setNewLocationType] = useState<LocationType>("DISPLAY");
   const [message, setMessage] = useState<string | null>(null);
+  const [locationFormError, setLocationFormError] = useState<string | null>(null);
+  const [locationFormBusy, setLocationFormBusy] = useState(false);
   const [newOperatorLogin, setNewOperatorLogin] = useState("");
   const [newOperatorPassword, setNewOperatorPassword] = useState("");
   const [operatorMessage, setOperatorMessage] = useState<string | null>(null);
@@ -126,25 +129,37 @@ export default function AdminPage() {
   async function createNewLocation(event: FormEvent) {
     event.preventDefault();
     setMessage(null);
-    const response = await fetch("/api/locations", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        code: newLocationCode,
-        name: newLocationName,
-        parentZone: newLocationZone,
-        locationType: newLocationType,
-      }),
-    });
-    const data = await response.json();
-    if (!response.ok) {
-      setMessage(data.error ?? "Nie udalo sie dodac lokalizacji.");
+    setLocationFormError(null);
+    const code = newLocationCode.trim().toUpperCase();
+    const name = newLocationName.trim() || code;
+    if (!code) {
+      setLocationFormError("Podaj kod lokalizacji.");
       return;
     }
-    setMessage("Lokalizacja dodana.");
-    setNewLocationCode("");
-    setNewLocationName("");
-    await load();
+    setLocationFormBusy(true);
+    try {
+      const response = await fetch("/api/locations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code,
+          name,
+          parentZone: newLocationZone,
+          locationType: newLocationType,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setLocationFormError(typeof data.error === "string" ? data.error : "Nie udalo sie dodac lokalizacji.");
+        return;
+      }
+      setMessage(`Lokalizacja dodana: ${data.item?.code ?? code}.`);
+      setNewLocationCode("");
+      setNewLocationName("");
+      await load();
+    } finally {
+      setLocationFormBusy(false);
+    }
   }
 
   function qtyOnLocation(code: string) {
@@ -165,6 +180,7 @@ export default function AdminPage() {
 
   async function saveEdit(code: string) {
     setMessage(null);
+    setLocationFormError(null);
     const response = await fetch(`/api/locations/${encodeURIComponent(code)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -176,7 +192,7 @@ export default function AdminPage() {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-      setMessage(data.error ?? "Nie udalo sie zapisac zmian.");
+      setLocationFormError(data.error ?? "Nie udalo sie zapisac zmian.");
       return;
     }
     setMessage(`Zapisano: ${code}`);
@@ -298,6 +314,23 @@ export default function AdminPage() {
             Zarzadzanie uzytkownikami (tylko administrator) oraz lokalizacjami. Dziala na telefonie i na komputerze.
           </p>
         </header>
+
+        <StockAnomalyAdminPanel />
+
+        <section className="rounded-xl bg-white p-4 shadow">
+          <h2 className="font-medium text-blue-900">Eksport danych</h2>
+          <p className="mt-2 text-sm text-blue-700">
+            Plik CSV: model, kod produktu (model + rozmiar), lokalizacja, stan na lokalizacji oraz suma sztuk danego kodu na
+            wszystkich lokalizacjach.
+          </p>
+          <a
+            className="mt-3 inline-flex w-full items-center justify-center rounded-lg bg-emerald-700 px-4 py-3 text-sm font-medium text-white hover:bg-emerald-800"
+            href="/api/admin/export/stock-csv"
+            download
+          >
+            Pobierz CSV stanów magazynowych
+          </a>
+        </section>
 
         <section className="rounded-xl bg-white p-4 shadow">
           <h2 className="font-medium text-blue-900">Uzytkownicy (operatorzy)</h2>
@@ -531,6 +564,9 @@ export default function AdminPage() {
                               </option>
                             ))}
                           </select>
+                          {locationFormError ? (
+                            <p className="text-xs font-medium text-red-700">{locationFormError}</p>
+                          ) : null}
                           <div className="flex gap-2">
                             <button
                               type="button"
@@ -597,7 +633,7 @@ export default function AdminPage() {
             />
             <input
               className="w-full rounded-lg border border-blue-200 p-2"
-              placeholder="Nazwa lokalizacji"
+              placeholder="Nazwa (opcjonalnie — domyslnie jak kod)"
               value={newLocationName}
               onChange={(e) => setNewLocationName(e.target.value)}
             />
@@ -627,9 +663,14 @@ export default function AdminPage() {
             <p className="text-xs text-blue-600">
               Strefa (SKLEP/ZAPLECZE) decyduje o priorytecie w picklist. Typ to opis miejsca — opcjonalny, do porzadku.
             </p>
-            {message ? <p className="text-sm text-blue-800">{message}</p> : null}
-            <button className="w-full rounded-lg bg-blue-700 p-3 font-medium text-white" type="submit">
-              Dodaj lokalizacje
+            {locationFormError ? <p className="text-sm font-medium text-red-700">{locationFormError}</p> : null}
+            {message ? <p className="text-sm text-emerald-800">{message}</p> : null}
+            <button
+              className="w-full rounded-lg bg-blue-700 p-3 font-medium text-white disabled:opacity-50"
+              type="submit"
+              disabled={locationFormBusy}
+            >
+              {locationFormBusy ? "Zapisywanie…" : "Dodaj lokalizacje"}
             </button>
           </form>
         </section>

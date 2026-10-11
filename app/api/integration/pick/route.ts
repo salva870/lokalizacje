@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { applyMovement, listSkuLocations } from "@/lib/data";
+import { applyMovement, getPickStatusByReferences, listSkuLocations } from "@/lib/data";
 import { assertIntegrationKey } from "@/lib/integrationAuth";
 import { isLocationChoiceRequiredError, resolveSingleSourceLocation } from "@/lib/stockSource";
 import { logServerError } from "@/lib/logger";
@@ -56,6 +56,43 @@ export async function POST(request: Request) {
 
     const movements = [];
     for (const line of resolved) {
+      if (parsed.data.action === "unpick") {
+        const ref = line.referenceNo?.trim();
+        if (!ref) {
+          return NextResponse.json(
+            { error: "Unpick wymaga referenceNo", code: "REFERENCE_REQUIRED" },
+            { status: 400 },
+          );
+        }
+        const statusEntries = await getPickStatusByReferences([ref]);
+        const status = statusEntries[0];
+        const netTotal = status?.netQty ?? 0;
+        if (netTotal <= 0) {
+          return NextResponse.json(
+            {
+              error: `Brak zdjętego stanu do zwrotu dla referencji ${ref}`,
+              code: "NOTHING_TO_UNPICK",
+              referenceNo: ref,
+            },
+            { status: 409 },
+          );
+        }
+        const loc = line.fromLocationCode;
+        const locRow = status?.locations.find((row) => row.locationCode === loc);
+        const netAtLoc = locRow?.netQty ?? 0;
+        if (netAtLoc <= 0) {
+          return NextResponse.json(
+            {
+              error: `W lokalizacji ${loc} nie ma zdjętego stanu dla ${ref}`,
+              code: "NOTHING_TO_UNPICK",
+              referenceNo: ref,
+            },
+            { status: 409 },
+          );
+        }
+        line.qty = Math.min(line.qty, netAtLoc);
+      }
+
       const movement = await applyMovement({
         operatorId,
         movementType: parsed.data.action === "pick" ? "REMOVE" : "ADD",

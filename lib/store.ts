@@ -434,6 +434,19 @@ export function getRecentMovements(limit = 30) {
   return stockMovements.slice(0, limit);
 }
 
+export function getMovementsForModel(model: string, limit = 300) {
+  const normalized = model.trim().toUpperCase();
+  if (!normalized) return [];
+  const capped = Math.min(Math.max(1, limit), 1000);
+  const out: StockMovement[] = [];
+  for (const movement of stockMovements) {
+    if (parseSkuModel(movement.sku).model !== normalized) continue;
+    out.push(movement);
+    if (out.length >= capped) break;
+  }
+  return out;
+}
+
 export function getPickStatusByReferences(references: string[]) {
   const unique = [...new Set(references.map((ref) => ref.trim()).filter(Boolean))];
   if (!unique.length) return [];

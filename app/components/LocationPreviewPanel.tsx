@@ -1,7 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { AddDuplicateConfirmModal } from "@/app/components/AddDuplicateConfirmModal";
+import { ModelLogButton } from "@/app/components/ModelLogButton";
 import { ModelProductImage } from "@/app/components/ModelProductImage";
+import { findModelDuplicateAddRisks, type ModelDuplicateAddRisk } from "@/lib/addDuplicateGuard";
 import { StockQtyDisplay } from "@/app/components/StockQtyDisplay";
 import { sortGroupsByModelOrder } from "@/lib/modelOrder";
 import { parseSkuModel } from "@/lib/skuModel";
@@ -88,6 +91,10 @@ export function LocationPreviewPanel({
   const [reorderAnchorIndex, setReorderAnchorIndex] = useState<number | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [stockBusyKey, setStockBusyKey] = useState<string | null>(null);
+  const [duplicateModalOpen, setDuplicateModalOpen] = useState(false);
+  const [duplicateRisks, setDuplicateRisks] = useState<ModelDuplicateAddRisk[]>([]);
+  const [duplicateBusy, setDuplicateBusy] = useState(false);
+  const duplicatePendingRef = useRef<null | (() => Promise<void>)>(null);
   const stockBusyRef = useRef(false);
 
   useEffect(() => {
@@ -219,13 +226,23 @@ export function LocationPreviewPanel({
   }, []);
 
   const changeSkuQty = useCallback(
-    async (sku: string, currentQty: number, model: string, delta: number | "remove") => {
+    async (sku: string, currentQty: number, model: string, delta: number | "remove", confirmDuplicateAdd = false) => {
       if (!locationCode || stockBusyRef.current) return;
       const removeAll = delta === "remove" || (typeof delta === "number" && currentQty + delta <= 0);
       const qtyToRemove = removeAll ? currentQty : Math.abs(typeof delta === "number" ? delta : currentQty);
+      const addQty = typeof delta === "number" && delta > 0 ? delta : 1;
       if (removeAll) {
         const ok = window.confirm(`Usunac ${sku} z ${locationCode} (${currentQty} szt.)?`);
         if (!ok) return;
+      }
+      if (!removeAll && !(typeof delta === "number" && delta < 0) && !confirmDuplicateAdd) {
+        const risks = findModelDuplicateAddRisks(stockAsRows, locationCode, [{ sku, qty: addQty }]);
+        if (risks.length > 0) {
+          setDuplicateRisks(risks);
+          duplicatePendingRef.current = () => changeSkuQty(sku, currentQty, model, delta, true);
+          setDuplicateModalOpen(true);
+          return;
+        }
       }
       const key = `${locationCode}:${sku}`;
       stockBusyRef.current = true;
@@ -246,12 +263,19 @@ export function LocationPreviewPanel({
               : {
                   movementType: "ADD",
                   sku,
-                  qty: 1,
+                  qty: addQty,
                   toLocationCode: locationCode,
+                  confirmDuplicateAdd: confirmDuplicateAdd || undefined,
                 },
           ),
         });
         const data = await response.json().catch(() => ({}));
+        if (response.status === 409 && data.code === "DUPLICATE_ADD_MODEL_QTY") {
+          setDuplicateRisks((data.risks as ModelDuplicateAddRisk[]) ?? []);
+          duplicatePendingRef.current = () => changeSkuQty(sku, currentQty, model, delta, true);
+          setDuplicateModalOpen(true);
+          return;
+        }
         if (!response.ok) {
           throw new Error(typeof data.error === "string" ? data.error : "Nie udalo sie zapisac zmiany.");
         }
@@ -276,7 +300,7 @@ export function LocationPreviewPanel({
         setStockBusyKey(null);
       }
     },
-    [locationCode, modelGroups, onStockChanged, saveOrder],
+    [locationCode, modelGroups, onStockChanged, saveOrder, stockAsRows],
   );
 
   if (!locationCode) {
@@ -376,12 +400,9 @@ export function LocationPreviewPanel({
             Boolean(highlightNorm) && group.lines.some((line) => line.sku.toUpperCase() === highlightNorm);
           const groupIsFiltered = filterModelSet.has(group.model.toUpperCase());
           const sizesExpanded = expandedSizesModels.has(group.model) || groupHasHighlight || groupIsFiltered;
-          const visibleLines = !reorderOpen
-            ? sizesExpanded
-              ? group.lines
-              : group.lines.slice(0, 2)
-            : [];
-          const hiddenSizeCount = !reorderOpen && !sizesExpanded ? Math.max(0, group.lines.length - 2) : 0;
+          /** Podglad: pokaz wszystkie rozmiary — ukrywanie 2 pierwszych powodowalo „brak stanu” przy istniejacym SKU. */
+          const visibleLines = !reorderOpen ? group.lines : [];
+          const hiddenSizeCount = 0;
 
           return (
             <li
@@ -400,7 +421,7 @@ export function LocationPreviewPanel({
                   selectReorderFocus(group.model, dataIndex);
                 }
               }}
-              className={`overflow-hidden rounded-2xl border bg-white shadow-sm transition-transform duration-200 ${
+              className={`relative overflow-hidden rounded-2xl border bg-white shadow-sm transition-transform duration-200 ${
                 isFocused
                   ? "border-indigo-500 ring-2 ring-indigo-300/70"
                   : groupHasHighlight || groupIsFiltered
@@ -410,6 +431,9 @@ export function LocationPreviewPanel({
                       : "border-indigo-200/80"
               }`}
             >
+              {!reorderOpen ? (
+                <ModelLogButton model={group.model} className="absolute right-2 top-2 z-20" />
+              ) : null}
               <div className="flex gap-3 p-3">
                 <div className="relative shrink-0">
                   <span className="absolute -left-1 -top-1 z-10 flex h-5 min-w-[1.25rem] items-center justify-center rounded-md bg-indigo-700 px-1 text-[10px] font-bold tabular-nums text-white shadow">
@@ -418,7 +442,7 @@ export function LocationPreviewPanel({
                   <ModelProductImage model={group.model} size="md" />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-start gap-2">
+                  <div className="flex items-start gap-2 pr-14">
                     <div className="min-w-0 flex-1">
                       <span className="font-mono text-sm font-bold text-blue-950">{group.model}</span>
                       {reorderOpen && !isFocused ? (
@@ -544,6 +568,30 @@ export function LocationPreviewPanel({
           );
         })}
       </ul>
+
+      <AddDuplicateConfirmModal
+        open={duplicateModalOpen}
+        locationCode={locationCode}
+        risks={duplicateRisks}
+        busy={duplicateBusy}
+        onCancel={() => {
+          setDuplicateModalOpen(false);
+          duplicatePendingRef.current = null;
+        }}
+        onConfirm={() => {
+          const run = duplicatePendingRef.current;
+          if (!run) {
+            setDuplicateModalOpen(false);
+            return;
+          }
+          setDuplicateBusy(true);
+          void run().finally(() => {
+            setDuplicateBusy(false);
+            duplicatePendingRef.current = null;
+            setDuplicateModalOpen(false);
+          });
+        }}
+      />
     </div>
   );
 }

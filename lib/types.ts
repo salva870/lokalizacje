@@ -2,11 +2,13 @@ export type Zone = "SKLEP" | "ZAPLECZE";
 
 export type LocationType =
   | "DISPLAY"
+  | "WYSTAWA"
   | "BUFFER"
   | "RESERVED"
   | "BACKROOM_BOX"
   | "BACKROOM_SHELF"
-  | "INACTIVE";
+  | "INACTIVE"
+  | "DAMAGED";
 
 export type MovementType =
   | "ADD"

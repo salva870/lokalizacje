@@ -12,6 +12,7 @@ import {
   updateOperatorRole as updateOperatorRoleLocal,
   getCurrentStock as getCurrentStockLocal,
   getRecentMovements as getRecentMovementsLocal,
+  getMovementsForModel as getMovementsForModelLocal,
   getPickStatusByReferences as getPickStatusByReferencesLocal,
   getRestoreSuggestions as getRestoreSuggestionsLocal,
   getModelRestoreSuggestions as getModelRestoreSuggestionsLocal,
@@ -38,7 +39,18 @@ import type { LocationType, Zone } from "@/lib/types";
 import { getSupabaseClient, isSupabaseConfigured, isSupabasePrivileged } from "@/lib/supabase";
 import { modelsInScanOrder, buildLocationModelOrder, modelsOnLocationFromItems } from "@/lib/modelOrder";
 import { parseSkuModel } from "@/lib/skuModel";
+import {
+  detectStockBulkAnomalies,
+  movementsForBulkRollback,
+  rollbackRefForBatch,
+  type StockBulkAnomaly,
+} from "@/lib/stockBulkAnomaly";
 import { resolveSingleSourceLocation } from "@/lib/stockSource";
+import {
+  buildReplenishmentPlan,
+  DEFAULT_MODEL_SHOP_DISPLAY_TARGET,
+  type ReplenishmentPlan,
+} from "@/lib/replenishment";
 
 type MovementInput = {
   operatorId: string;
@@ -186,6 +198,75 @@ export async function getCurrentStock() {
   }));
 }
 
+export async function listStockBulkAnomalies(): Promise<StockBulkAnomaly[]> {
+  const movements = await getMovementsForAnomalyScan();
+  return detectStockBulkAnomalies(movements);
+}
+
+export async function rollbackStockBulkAnomaly(batchId: string, operatorId: string) {
+  const movements = await getMovementsForAnomalyScan();
+  const adds = movementsForBulkRollback(batchId, movements);
+  if (!adds.length) {
+    throw new Error("Nie znaleziono niecofniętej anomalii lub paczka została już wycofana.");
+  }
+  const rollbackRef = rollbackRefForBatch(batchId);
+  const reversed: string[] = [];
+  for (const add of adds) {
+    const from = add.toLocationCode?.trim().toUpperCase();
+    if (!from) continue;
+    const movement = await applyMovement({
+      operatorId,
+      movementType: "REMOVE",
+      sku: add.sku,
+      qty: add.qty,
+      fromLocationCode: from,
+      referenceNo: rollbackRef,
+    });
+    reversed.push(movement.id);
+  }
+  return { batchId, rollbackRef, reversedCount: reversed.length, movementIds: reversed };
+}
+
+export async function getMovementsForAnomalyScan() {
+  const since = new Date(Date.now() - 120 * 86400000).toISOString();
+  if (!isSupabaseConfigured) {
+    const local = await getRecentMovementsLocal(8000);
+    return local.filter((row) => row.createdAt >= since);
+  }
+  if (!isSupabasePrivileged) {
+    throw new Error("Brak SUPABASE_SERVICE_ROLE_KEY. Dodaj klucz serwerowy w .env backendu.");
+  }
+  const supabase = getSupabaseClient();
+  const pageSize = 1000;
+  let offset = 0;
+  const all: any[] = [];
+  while (true) {
+    const { data, error } = await supabase
+      .from("stock_movements")
+      .select("id,created_at,operator_id,movement_type,sku,qty,from_location_code,to_location_code,reference_no")
+      .gte("created_at", since)
+      .or("reference_no.like.PL:%,reference_no.like.BULK_ROLLBACK:%")
+      .order("created_at", { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (error) throw new Error(mapSupabaseError(error, "Nie udalo sie pobrac ruchow do analizy"));
+    const batch = data ?? [];
+    all.push(...batch);
+    if (batch.length < pageSize) break;
+    offset += pageSize;
+  }
+  return all.map((row) => ({
+    id: String(row.id),
+    createdAt: row.created_at,
+    operatorId: row.operator_id,
+    movementType: row.movement_type,
+    sku: row.sku,
+    qty: row.qty,
+    fromLocationCode: row.from_location_code ?? undefined,
+    toLocationCode: row.to_location_code ?? undefined,
+    referenceNo: row.reference_no ?? undefined,
+  }));
+}
+
 export async function getRecentMovements(limit = 30) {
   if (!isSupabaseConfigured) return getRecentMovementsLocal(limit);
   if (!isSupabasePrivileged) {
@@ -209,6 +290,42 @@ export async function getRecentMovements(limit = 30) {
     toLocationCode: row.to_location_code ?? undefined,
     referenceNo: row.reference_no ?? undefined,
   }));
+}
+
+export async function getMovementsForModel(model: string, limit = 300) {
+  const normalized = model.trim().toUpperCase();
+  const capped = Math.min(Math.max(1, limit), 1000);
+  if (!normalized) return [];
+  if (!isSupabaseConfigured) return getMovementsForModelLocal(normalized, capped);
+
+  if (!isSupabasePrivileged) {
+    throw new Error("Brak SUPABASE_SERVICE_ROLE_KEY. Dodaj klucz serwerowy w .env backendu.");
+  }
+  const supabase = getSupabaseClient();
+  const overfetch = Math.min(capped * 4, 2000);
+  const { data, error } = await supabase
+    .from("stock_movements")
+    .select("id,created_at,operator_id,movement_type,sku,qty,from_location_code,to_location_code,reference_no")
+    .or(`sku.eq.${normalized},sku.like.${normalized}-%`)
+    .order("created_at", { ascending: false })
+    .limit(overfetch);
+  if (error) throw new Error(mapSupabaseError(error, "Nie udalo sie pobrac historii modelu"));
+
+  const mapped = ((data ?? []) as any[])
+    .map((row) => ({
+      id: String(row.id),
+      createdAt: row.created_at,
+      operatorId: row.operator_id,
+      movementType: row.movement_type as MovementType,
+      sku: String(row.sku || "").toUpperCase(),
+      qty: row.qty,
+      fromLocationCode: row.from_location_code ?? undefined,
+      toLocationCode: row.to_location_code ?? undefined,
+      referenceNo: row.reference_no ?? undefined,
+    }))
+    .filter((row) => parseSkuModel(row.sku).model === normalized);
+
+  return mapped.slice(0, capped);
 }
 
 export async function getPickStatusByReferences(references: string[]) {
@@ -1146,4 +1263,84 @@ export async function readSaleAttachment(id: string): Promise<{ buffer: Buffer; 
   const absPath = path.join(process.cwd(), "logs", "sales", data.storage_path);
   if (!fs.existsSync(absPath)) return null;
   return { buffer: fs.readFileSync(absPath), mimeType: data.mime_type };
+}
+
+export async function getModelShopDisplayTarget(model: string) {
+  const normalized = model.trim().toUpperCase();
+  if (!normalized) throw new Error("Brak modelu");
+  if (!isSupabaseConfigured) {
+    return { model: normalized, targetQty: DEFAULT_MODEL_SHOP_DISPLAY_TARGET };
+  }
+  if (!isSupabasePrivileged) {
+    throw new Error("Brak SUPABASE_SERVICE_ROLE_KEY. Dodaj klucz serwerowy w .env backendu.");
+  }
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from("model_shop_display_target")
+    .select("target_qty")
+    .eq("model", normalized)
+    .maybeSingle();
+  if (error) throw new Error(mapSupabaseError(error, "Nie udalo sie pobrac ustawienia ekspozycji"));
+  const targetQty =
+    data && typeof data.target_qty === "number" ? data.target_qty : DEFAULT_MODEL_SHOP_DISPLAY_TARGET;
+  return { model: normalized, targetQty };
+}
+
+export async function setModelShopDisplayTarget(model: string, targetQty: number) {
+  const normalized = model.trim().toUpperCase();
+  const qty = Math.max(0, Math.min(99, Math.floor(targetQty)));
+  if (!normalized) throw new Error("Brak modelu");
+  if (!isSupabaseConfigured) {
+    return { model: normalized, targetQty: qty };
+  }
+  if (!isSupabasePrivileged) {
+    throw new Error("Brak SUPABASE_SERVICE_ROLE_KEY. Dodaj klucz serwerowy w .env backendu.");
+  }
+  const supabase = getSupabaseClient();
+  const { error } = await supabase.from("model_shop_display_target").upsert(
+    { model: normalized, target_qty: qty, updated_at: new Date().toISOString() },
+    { onConflict: "model" },
+  );
+  if (error) throw new Error(mapSupabaseError(error, "Nie udalo sie zapisac ustawienia ekspozycji"));
+  return { model: normalized, targetQty: qty };
+}
+
+async function listModelShopDisplayTargetMap(): Promise<Map<string, number>> {
+  if (!isSupabaseConfigured) return new Map();
+  if (!isSupabasePrivileged) {
+    throw new Error("Brak SUPABASE_SERVICE_ROLE_KEY. Dodaj klucz serwerowy w .env backendu.");
+  }
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase.from("model_shop_display_target").select("model,target_qty");
+  if (error) throw new Error(mapSupabaseError(error, "Nie udalo sie pobrac ustawien ekspozycji"));
+  const map = new Map<string, number>();
+  for (const row of data ?? []) {
+    if (!row?.model) continue;
+    map.set(String(row.model).trim().toUpperCase(), Math.max(0, Math.floor(Number(row.target_qty) || 0)));
+  }
+  return map;
+}
+
+export async function getReplenishmentPlan(): Promise<ReplenishmentPlan> {
+  const [stock, locations, modelTargets] = await Promise.all([
+    getCurrentStock(),
+    listLocations(),
+    listModelShopDisplayTargetMap(),
+  ]);
+  return buildReplenishmentPlan(
+    stock.map((row) => ({
+      locationCode: row.locationCode,
+      sku: row.sku,
+      qty: row.qty,
+    })),
+    locations.map((loc) => ({
+      code: loc.code,
+      name: loc.name,
+      parentZone: loc.parentZone,
+      locationType: loc.locationType,
+      sortOrder: loc.sortOrder,
+      isActive: loc.isActive,
+    })),
+    modelTargets,
+  );
 }

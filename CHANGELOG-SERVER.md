@@ -2,6 +2,13 @@
 
 Format: data (CET) — krótki opis zmiany na produkcji.
 
+## 2026-09-21
+
+- **ADD:** po zapisie widoczny kod SKU (komunikat, toast, warstwa weryfikacji modelu).
+- **Uzupelnij stan:** kafelek w wierszu z Podglad; lista tras uzupelnienia → Przenies Z→DO; przypięty wskaźnik aktywnej operacji na górze.
+- **MOVE:** wybór pojedynczych rozmiarów (checkbox przy rozmiarze), nie tylko całego modelu.
+- **Stany → Uzupełnianie:** plan zaplecze → sklep (`/api/replenishment/plan`).
+
 ## 2026-09-13
 
 - **Repozytorium:** kod produkcyjny zsynchronizowany z [github.com/salva870/lokalizacje](https://github.com/salva870/lokalizacje) (`git pull` / `git push` z `/root/lokalizacje`).

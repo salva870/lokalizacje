@@ -12,8 +12,11 @@ import { LocationPreviewPanel } from "@/app/components/LocationPreviewPanel";
 import { SkuPickerEntry } from "@/app/components/SkuPickerEntry";
 import { MoveModelPicker } from "@/app/components/MoveModelPicker";
 import { MovementIcon, operationVisuals, type OperationMode } from "@/app/components/MovementIcon";
+import { StockAnomalyHomeBanner } from "@/app/components/StockAnomalyHomeBanner";
 import { StockPanel } from "@/app/components/StockPanel";
 import { LocationOrderPanel } from "@/app/components/LocationOrderPanel";
+import { AddDuplicateConfirmModal } from "@/app/components/AddDuplicateConfirmModal";
+import { findDuplicateAddRisks, type DuplicateAddRisk } from "@/lib/addDuplicateGuard";
 import { playOperationSuccess, playScanBeep, unlockScanFeedback } from "@/lib/appSounds";
 import { modelsInScanOrder } from "@/lib/modelOrder";
 import { parseSkuModel } from "@/lib/skuModel";
@@ -24,6 +27,9 @@ import { summarizeStockRows, modelQtyAtLocation } from "@/lib/stockViews";
 import { diffReconcileStock, reconcileDiffHasChanges } from "@/lib/reconcileDiff";
 import { buildLocationTypeMap } from "@/lib/stockClassification";
 import { resolveSaleLineLocation, type SaleQueueLine } from "@/lib/saleQueue";
+import { formatAddSuccessMessage } from "@/lib/formatAddSummary";
+import type { ReplenishmentPlan } from "@/lib/replenishment";
+import { groupReplenishmentRoutes, type ReplenishmentRouteSuggestion } from "@/lib/replenishmentRoutes";
 import type { LocationType, Zone } from "@/lib/types";
 
 type MovementType = "ADD" | "REMOVE" | "MOVE" | "RESTORE_FROM_TMP" | "MOVE_TO_SALE" | "SALE_FINALIZE";
@@ -37,9 +43,9 @@ const movementPresets: OperationMode[] = [
   "MOVE_TO_SALE",
 ];
 
-const operationGroups: Array<{ title: string; types: OperationMode[]; cols: 2 | 3 }> = [
-  { title: "Stan lokalizacji", types: ["ADD", "RECONCILE", "REMOVE"], cols: 3 },
-  { title: "Podglad", types: ["PREVIEW"], cols: 2 },
+const operationGroups: Array<{ title: string; types: OperationMode[]; cols: 1 | 2 | 3 }> = [
+  { title: "Stan lokalizacji", types: ["ADD", "REMOVE"], cols: 2 },
+  { title: "Podglad i uzupelnianie", types: ["PREVIEW", "RECONCILE"], cols: 2 },
   { title: "Przenoszenie", types: ["MOVE", "RESTORE_FROM_TMP"], cols: 2 },
   { title: "Sprzedaz", types: ["MOVE_TO_SALE"], cols: 2 },
 ];
@@ -160,11 +166,21 @@ export default function Home() {
 
   const [previewHighlightSku, setPreviewHighlightSku] = useState<string | null>(null);
   const [previewFilterModels, setPreviewFilterModels] = useState<string[]>([]);
+  const [replenishRoutes, setReplenishRoutes] = useState<ReplenishmentRouteSuggestion[]>([]);
+  const [replenishPlanLoading, setReplenishPlanLoading] = useState(false);
+  const [replenishInventoryOpen, setReplenishInventoryOpen] = useState(false);
+
   const [addVerifyPrompt, setAddVerifyPrompt] = useState<{
     locationCode: string;
     model: string;
     expectedQty: number;
+    addedSkus: Array<{ sku: string; qty: number }>;
   } | null>(null);
+  const [addDuplicateConfirmOpen, setAddDuplicateConfirmOpen] = useState(false);
+  const [addDuplicateRisks, setAddDuplicateRisks] = useState<DuplicateAddRisk[]>([]);
+  const [addDuplicateLocation, setAddDuplicateLocation] = useState("");
+  const [addDuplicateBusy, setAddDuplicateBusy] = useState(false);
+  const addDuplicatePendingRef = useRef<null | (() => Promise<void>)>(null);
   const [stockOpen, setStockOpen] = useState(false);
   const [locationOrderOpen, setLocationOrderOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -237,6 +253,9 @@ export default function Home() {
   const [manualLocZone, setManualLocZone] = useState<"SKLEP" | "ZAPLECZE">("SKLEP");
   const [manualLocType, setManualLocType] = useState<LocationType>("DISPLAY");
   const [manualLocBusy, setManualLocBusy] = useState(false);
+  const [manualLocError, setManualLocError] = useState<string | null>(null);
+  const [quickLocationBusy, setQuickLocationBusy] = useState(false);
+  const [quickLocationError, setQuickLocationError] = useState<string | null>(null);
 
   async function loadData(includeDraft = false) {
     const withTimeout = async (url: string, timeoutMs = 10000) => {
@@ -661,6 +680,48 @@ export default function Home() {
     setOperationMode(next);
   }, []);
 
+  const loadReplenishmentRoutes = useCallback(async () => {
+    setReplenishPlanLoading(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/replenishment/plan");
+      const data = (await response.json().catch(() => ({}))) as ReplenishmentPlan & { error?: string };
+      if (!response.ok) {
+        setError(typeof data.error === "string" ? data.error : "Nie udalo sie pobrac planu uzupelnienia.");
+        setReplenishRoutes([]);
+        return;
+      }
+      const transfers = Array.isArray(data.transfers) ? data.transfers : [];
+      setReplenishRoutes(groupReplenishmentRoutes(transfers));
+    } catch {
+      setError("Blad polaczenia przy pobieraniu planu uzupelnienia.");
+      setReplenishRoutes([]);
+    } finally {
+      setReplenishPlanLoading(false);
+    }
+  }, []);
+
+  const beginReplenishRoute = useCallback(
+    (route: ReplenishmentRouteSuggestion) => {
+      setError(null);
+      setMessage(null);
+      setMoveQueue([]);
+      setFromLocationCode(route.fromLocationCode);
+      setToLocationCode(route.toLocationCode);
+      setActiveLocationCode(route.fromLocationCode);
+      changeOperationMode("MOVE");
+      setMessage(
+        `Uzupelnianie ${route.toLocationCode}: zaznacz rozmiary na ${route.fromLocationCode} (${route.totalQty} szt. w planie) lub skanuj produkty.`,
+      );
+    },
+    [changeOperationMode],
+  );
+
+  useEffect(() => {
+    if (!ready || operationMode !== "RECONCILE") return;
+    void loadReplenishmentRoutes();
+  }, [ready, operationMode, loadReplenishmentRoutes]);
+
   const openLocationPreview = useCallback(
     (locationCode: string, models?: string[]) => {
       const code = locationCode.trim().toUpperCase();
@@ -838,6 +899,30 @@ export default function Home() {
     const q = Math.max(1, Math.floor(nextQty));
     setMoveQueue((prev) => prev.map((row) => (row.sku === skuNorm ? { ...row, qty: q } : row)));
   }, []);
+
+  const toggleMoveSku = useCallback(
+    (sku: string, selected: boolean) => {
+      const skuNorm = sku.trim().toUpperCase();
+      const row = moveSourceLocationStock.find((entry) => entry.sku.trim().toUpperCase() === skuNorm);
+      if (!row) return;
+
+      if (selected) {
+        setMoveQueue((prev) => {
+          const next = [...prev];
+          const idx = next.findIndex((line) => line.sku === skuNorm);
+          const line = { sku: skuNorm, qty: row.qty };
+          if (idx >= 0) next[idx] = line;
+          else next.push(line);
+          return next;
+        });
+        setMessage(`Dodano rozmiar ${skuNorm} (${row.qty} szt.) do przeniesienia.`);
+      } else {
+        setMoveQueue((prev) => prev.filter((line) => line.sku !== skuNorm));
+        setMessage(`Usunieto ${skuNorm} z listy przeniesienia.`);
+      }
+    },
+    [moveSourceLocationStock],
+  );
 
   const toggleMoveModel = useCallback(
     (model: string, selected: boolean) => {
@@ -1034,7 +1119,7 @@ export default function Home() {
     }
   }
 
-  async function submitAddBatch() {
+  async function submitAddBatch(confirmDuplicateAdd = false) {
     setError(null);
     setMessage(null);
     const resolved = resolveMovementPayload();
@@ -1046,14 +1131,34 @@ export default function Home() {
     if (addQueue.length === 0) return;
 
     const queueSnapshot = [...addQueue];
+    const duplicateRisks = findDuplicateAddRisks(stock, to, queueSnapshot);
+    if (!confirmDuplicateAdd && duplicateRisks.length > 0) {
+      setAddDuplicateRisks(duplicateRisks);
+      setAddDuplicateLocation(to);
+      addDuplicatePendingRef.current = () => submitAddBatch(true);
+      setAddDuplicateConfirmOpen(true);
+      return;
+    }
+    setAddDuplicateConfirmOpen(false);
+
     const modelGroups = groupQueueByModel(queueSnapshot);
-    let verifyPrompt: { locationCode: string; model: string; expectedQty: number } | null = null;
+    let verifyPrompt: {
+      locationCode: string;
+      model: string;
+      expectedQty: number;
+      addedSkus: Array<{ sku: string; qty: number }>;
+    } | null = null;
     if (modelGroups.length === 1) {
       const model = modelGroups[0].model;
       const addedQty = modelGroups[0].totalQty;
       const previousQty = modelQtyAtLocation(stock, to, model);
       if (previousQty > 0) {
-        verifyPrompt = { locationCode: to, model, expectedQty: previousQty + addedQty };
+        verifyPrompt = {
+          locationCode: to,
+          model,
+          expectedQty: previousQty + addedQty,
+          addedSkus: queueSnapshot.map((line) => ({ sku: line.sku, qty: line.qty })),
+        };
       }
     }
 
@@ -1066,6 +1171,7 @@ export default function Home() {
           sku: line.sku,
           qty: line.qty,
           toLocationCode: to,
+          confirmDuplicateAdd: confirmDuplicateAdd || undefined,
         }),
       });
       const data = await response.json();
@@ -1074,7 +1180,9 @@ export default function Home() {
         return;
       }
     }
-    setMessage(`Dodano ${queueSnapshot.length} poz. na ${to}.`);
+    const addSuccessText = formatAddSuccessMessage(to, queueSnapshot);
+    setMessage(addSuccessText);
+    pushScanToast(addSuccessText);
     playOperationSuccess("ADD");
     const scannedModels = modelsInScanOrder(queueSnapshot);
     if (scannedModels.length > 0) {
@@ -1216,6 +1324,7 @@ export default function Home() {
     qty: number;
     fromLocationCode?: string;
     toLocationCode?: string;
+    confirmDuplicateAdd?: boolean;
   }) {
     const response = await fetch("/api/movements", {
       method: "POST",
@@ -1223,6 +1332,16 @@ export default function Home() {
       body: JSON.stringify(payload),
     });
     const data = await response.json();
+    if (response.status === 409 && data.code === "DUPLICATE_ADD_MODEL_QTY") {
+      setAddDuplicateRisks((data.risks as DuplicateAddRisk[]) ?? []);
+      setAddDuplicateLocation(
+        typeof data.locationCode === "string" ? data.locationCode : payload.toLocationCode?.toUpperCase() ?? "",
+      );
+      addDuplicatePendingRef.current = () =>
+        postSaleOrMovement({ ...payload, confirmDuplicateAdd: true });
+      setAddDuplicateConfirmOpen(true);
+      return;
+    }
     if (response.status === 409 && data.code === "LOCATION_CHOICE_REQUIRED") {
       setSaleSourceOptions(
         (data.locations ?? []).map((row: { locationCode: string; qty: number }) => ({
@@ -1244,9 +1363,23 @@ export default function Home() {
     }
 
     setSaleSourceOpen(false);
-    setMessage(payload.movementType === "MOVE_TO_SALE" || payload.movementType === "SALE_FINALIZE"
-      ? "Sprzedaz zapisana w logu, zdjeto ze stanu"
-      : "Ruch zapisany");
+    if (payload.movementType === "ADD") {
+      const loc = payload.toLocationCode?.trim().toUpperCase() ?? "";
+      const skuNorm = payload.sku.trim().toUpperCase();
+      const q = Math.max(1, Math.floor(payload.qty ?? 1));
+      const addText =
+        q > 1
+          ? `Dodano ${skuNorm} (${q} szt.) na lokalizację ${loc}.`
+          : `Dodano kod ${skuNorm} na lokalizację ${loc}.`;
+      setMessage(addText);
+      pushScanToast(addText);
+    } else {
+      setMessage(
+        payload.movementType === "MOVE_TO_SALE" || payload.movementType === "SALE_FINALIZE"
+          ? "Sprzedaz zapisana w logu, zdjeto ze stanu"
+          : "Ruch zapisany",
+      );
+    }
     playOperationSuccess(payload.movementType);
     setSku("");
     await loadData();
@@ -1665,7 +1798,10 @@ export default function Home() {
       if (/^[A-Z0-9_-]{2,64}$/.test(candidate)) {
         setPendingUnknownLocationCode(candidate);
         setQuickLocationName(candidate);
-        setMessage(`Nieznana lokalizacja: ${candidate}. Mozesz ja zdefiniowac (admin).`);
+        setQuickLocationZone("ZAPLECZE");
+        setQuickLocationType(defaultLocationTypeForZone("ZAPLECZE"));
+        setQuickLocationError(null);
+        setMessage(`Nieznana lokalizacja: ${candidate}. Zdefiniuj ja w oknie ponizej (admin).`);
         setScannerStatus("Lokalizacja nie istnieje w bazie.");
         stopScanner();
         return;
@@ -1936,28 +2072,46 @@ export default function Home() {
 
   async function createQuickLocation(event: FormEvent) {
     event.preventDefault();
-    if (!pendingUnknownLocationCode) return;
+    if (!pendingUnknownLocationCode || quickLocationBusy) return;
+    const code = pendingUnknownLocationCode.trim().toUpperCase();
+    const name = (quickLocationName || code).trim();
+    setQuickLocationBusy(true);
+    setQuickLocationError(null);
     setError(null);
     setMessage(null);
-    const response = await fetch("/api/locations", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        code: pendingUnknownLocationCode,
-        name: quickLocationName || pendingUnknownLocationCode,
-        parentZone: quickLocationZone,
-        locationType: quickLocationType,
-      }),
-    });
-    const data = await response.json();
-    if (!response.ok) {
-      setError(data.error ?? "Nie udalo sie dodac lokalizacji.");
-      return;
+    try {
+      const response = await fetch("/api/locations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code,
+          name: name.length >= 2 ? name : code,
+          parentZone: quickLocationZone,
+          locationType: quickLocationType,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const msg =
+          typeof data.error === "string"
+            ? data.error
+            : response.status === 403
+              ? "Brak uprawnien administratora."
+              : "Nie udalo sie dodac lokalizacji.";
+        setQuickLocationError(msg);
+        return;
+      }
+      const savedCode = data.item?.code ?? code;
+      setActiveLocationCode(savedCode);
+      setPendingUnknownLocationCode(null);
+      setQuickLocationError(null);
+      setMessage(`Dodano lokalizacje i ustawiono jako aktywna: ${savedCode}`);
+      await loadData();
+    } catch {
+      setQuickLocationError("Blad polaczenia — sprobuj ponownie.");
+    } finally {
+      setQuickLocationBusy(false);
     }
-    setActiveLocationCode(pendingUnknownLocationCode);
-    setPendingUnknownLocationCode(null);
-    setMessage(`Dodano lokalizacje i ustawiono jako aktywna: ${data.item.code}`);
-    await loadData();
   }
 
   async function createManualLocation(event: FormEvent) {
@@ -1965,6 +2119,7 @@ export default function Home() {
     const code = manualLocCode.trim().toUpperCase();
     if (!code) return;
     setManualLocBusy(true);
+    setManualLocError(null);
     setError(null);
     setMessage(null);
     try {
@@ -1978,17 +2133,26 @@ export default function Home() {
           locationType: manualLocType,
         }),
       });
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        setError(data.error ?? "Nie udalo sie dodac lokalizacji.");
+        setManualLocError(
+          typeof data.error === "string"
+            ? data.error
+            : response.status === 403
+              ? "Brak uprawnien administratora."
+              : "Nie udalo sie dodac lokalizacji.",
+        );
         return;
       }
-      setActiveLocationCode(data.item.code);
+      const savedCode = data.item?.code ?? code;
+      setActiveLocationCode(savedCode);
       setManualLocationOpen(false);
       setManualLocCode("");
       setManualLocName("");
-      setMessage(`Dodano lokalizacje: ${data.item.code}`);
+      setMessage(`Dodano lokalizacje: ${savedCode}`);
       await loadData();
+    } catch {
+      setManualLocError("Blad polaczenia — sprobuj ponownie.");
     } finally {
       setManualLocBusy(false);
     }
@@ -2115,11 +2279,26 @@ export default function Home() {
     );
   }
 
+  const activeOperationVisual = operationVisuals[operationMode];
+
   return (
     <main
       className="relative min-h-dvh w-full min-w-0 bg-gradient-to-b from-blue-100 to-blue-50 pb-[calc(6rem+env(safe-area-inset-bottom))] text-blue-950"
-      style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top))" }}
+      style={{ paddingTop: "max(3.25rem, calc(env(safe-area-inset-top) + 2.75rem))" }}
     >
+      <div
+        className="pointer-events-none fixed inset-x-0 top-0 z-[48] flex justify-center px-3"
+        style={{ paddingTop: "max(0.25rem, env(safe-area-inset-top))" }}
+        aria-live="polite"
+      >
+        <div
+          className={`flex max-w-[min(100%,20rem)] items-center justify-center gap-2 rounded-full border-2 px-3 py-1.5 shadow-lg backdrop-blur-md ${activeOperationVisual.activeClass}`}
+        >
+          <MovementIcon type={operationMode} active size="sm" />
+          <span className="truncate text-xs font-bold text-blue-950 sm:text-sm">{movementTileLabels[operationMode]}</span>
+        </div>
+      </div>
+
       {operationMode === "MOVE" && fromLocationCode.trim() ? (
         <button
           type="button"
@@ -2173,6 +2352,7 @@ export default function Home() {
       >
         {ready ? (
           <>
+            <StockAnomalyHomeBanner userRole={userRole} />
             <p className="mb-2 text-center text-xs font-medium uppercase tracking-wide text-blue-600">
               Wybierz operacje
             </p>
@@ -2182,7 +2362,11 @@ export default function Home() {
                   <p className="mb-1.5 px-0.5 text-[11px] font-semibold uppercase tracking-wide text-blue-500">
                     {group.title}
                   </p>
-                  <div className={`grid gap-2 ${group.cols === 3 ? "grid-cols-3" : "grid-cols-2"}`}>
+                  <div
+                    className={`grid gap-2 ${
+                      group.cols === 3 ? "grid-cols-3" : group.cols === 2 ? "grid-cols-2" : "grid-cols-1"
+                    }`}
+                  >
                     {group.types.map((type) => {
                       const active = operationMode === type;
                       const visual = operationVisuals[type];
@@ -2250,6 +2434,7 @@ export default function Home() {
                   setManualLocName("");
                   setManualLocZone("SKLEP");
                   setManualLocType("DISPLAY");
+                  setManualLocError(null);
                 }}
               >
                 Nowa lokalizacja
@@ -2278,13 +2463,14 @@ export default function Home() {
                   stockRows={moveSourceLocationStock}
                   moveQueue={moveQueue}
                   onToggleModel={toggleMoveModel}
+                  onToggleSku={toggleMoveSku}
                   onSelectAll={selectAllMoveModels}
                   onClearSelection={clearMoveModelSelection}
                 />
                 <ScanQueuePanel
                   queue={moveQueue}
                   tone="blue"
-                  emptyHint="Brak pozycji — zaznacz model powyzej lub zeskanuj produkty."
+                  emptyHint="Brak pozycji — zaznacz rozmiary lub model powyzej, albo zeskanuj produkty."
                   onClear={clearCurrentScanSession}
                   onAdjustQty={setMoveQueueLineQty}
                   onRemove={removeMoveQueueLine}
@@ -2379,48 +2565,104 @@ export default function Home() {
 
             {operationMode === "RECONCILE" ? (
               <section className="mt-4 rounded-2xl border-2 border-teal-400/70 bg-white p-4 shadow-md">
-                <p className="text-sm font-semibold text-teal-950">Aktualizuj stan lokalizacji</p>
-                <p className="mt-1 text-xs text-teal-800">
-                  1) Wybierz lub zeskanuj lokalizacje. 2) Zeskanuj produkty od lewej do prawej. 3) Zapisz — nadpisze
-                  stan (takze gdy lokalizacja byla pusta) i kolejnosc modeli.
-                </p>
-                <label className="mt-3 block text-xs font-medium uppercase tracking-wide text-teal-700">
-                  Lokalizacja
-                </label>
-                <select
-                  className="mt-1 w-full rounded-2xl border border-teal-200 bg-white p-3 text-sm font-semibold text-blue-950"
-                  value={(activeLocationCode ?? toLocationCode).trim().toUpperCase()}
-                  onChange={(e) => {
-                    const code = e.target.value;
-                    setActiveLocationCode(code || null);
-                    setToLocationCode(code);
-                  }}
-                >
-                  <option value="">— wybierz lub zeskanuj wieszak —</option>
-                  {locations
-                    .filter((loc) => loc.isActive)
-                    .map((loc) => (
-                      <option key={loc.code} value={loc.code}>
-                        {loc.code} — {loc.name}
-                      </option>
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-semibold text-teal-950">Uzupelnij ekspozycje</p>
+                    <p className="mt-1 text-xs text-teal-800">
+                      Wybierz lokalizacje do uzupelnienia — ustawimy przeniesienie Z → DO. Potem zaznacz rozmiary lub
+                      skanuj produkty w trybie Przenies.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="shrink-0 rounded-xl border border-teal-300 bg-white px-3 py-2 text-xs font-semibold text-teal-900"
+                    disabled={replenishPlanLoading}
+                    onClick={() => void loadReplenishmentRoutes()}
+                  >
+                    {replenishPlanLoading ? "Ladowanie…" : "Odswiez"}
+                  </button>
+                </div>
+                {replenishPlanLoading ? (
+                  <p className="mt-3 text-sm text-teal-800">Szukam lokalizacji do uzupelnienia…</p>
+                ) : replenishRoutes.length === 0 ? (
+                  <p className="mt-3 rounded-xl border border-dashed border-teal-200 bg-teal-50/50 px-3 py-2 text-sm text-teal-900">
+                    Brak zaplanowanych uzupelnien (ekspozycja na stanie docelowym lub brak towaru na zapleczu).
+                  </p>
+                ) : (
+                  <ul className="mt-3 max-h-72 space-y-2 overflow-y-auto">
+                    {replenishRoutes.map((route) => (
+                      <li key={route.key}>
+                        <button
+                          type="button"
+                          className="w-full rounded-2xl border border-teal-200 bg-teal-50/60 px-3 py-3 text-left shadow-sm active:scale-[0.99] hover:border-teal-400"
+                          onClick={() => beginReplenishRoute(route)}
+                        >
+                          <p className="font-mono text-sm font-bold text-teal-950">
+                            {route.toLocationCode}
+                            {route.toLocationName ? (
+                              <span className="ml-1 font-sans font-normal text-teal-800">({route.toLocationName})</span>
+                            ) : null}
+                          </p>
+                          <p className="mt-1 text-xs leading-relaxed text-teal-900">
+                            Uzupelnij z{" "}
+                            <span className="font-mono font-semibold">{route.fromLocationCode}</span>
+                            {route.fromLocationName ? ` (${route.fromLocationName})` : ""} —{" "}
+                            <strong>{route.totalQty}</strong> szt., {route.lineCount} poz.
+                          </p>
+                        </button>
+                      </li>
                     ))}
-                </select>
-                <ScanQueuePanel
-                  queue={reconcileQueue}
-                  tone="emerald"
-                  emptyHint="Brak pozycji — zacznij skanowac produkty na wieszaku."
-                  onClear={clearCurrentScanSession}
-                  onAdjustQty={setReconcileQueueLineQty}
-                  onRemove={removeReconcileQueueLine}
-                />
-                <button
-                  type="button"
-                  className="mt-4 w-full rounded-2xl bg-teal-700 py-3.5 text-sm font-bold text-white shadow-md active:scale-[0.99] disabled:opacity-50"
-                  disabled={reconcileBusy || reconcileQueue.length === 0}
-                  onClick={() => requestReconcileSave()}
+                  </ul>
+                )}
+                <details
+                  className="mt-4 rounded-xl border border-teal-100 bg-teal-50/30 p-3 text-sm text-teal-950"
+                  open={replenishInventoryOpen}
+                  onToggle={(e) => setReplenishInventoryOpen((e.target as HTMLDetailsElement).open)}
                 >
-                  {reconcileBusy ? "Zapisywanie…" : "Zapisz aktualny stan lokalizacji"}
-                </button>
+                  <summary className="cursor-pointer font-semibold text-teal-900">
+                    Inwentaryzacja — skan calej lokalizacji (nadpisanie stanu)
+                  </summary>
+                  <p className="mt-2 text-xs text-teal-800">
+                    Rzadziej: zeskanuj wszystkie produkty na wieszaku i zapisz stan od zera.
+                  </p>
+                  <label className="mt-3 block text-xs font-medium uppercase tracking-wide text-teal-700">
+                    Lokalizacja
+                  </label>
+                  <select
+                    className="mt-1 w-full rounded-2xl border border-teal-200 bg-white p-3 text-sm font-semibold text-blue-950"
+                    value={(activeLocationCode ?? toLocationCode).trim().toUpperCase()}
+                    onChange={(e) => {
+                      const code = e.target.value;
+                      setActiveLocationCode(code || null);
+                      setToLocationCode(code);
+                    }}
+                  >
+                    <option value="">— wybierz lub zeskanuj wieszak —</option>
+                    {locations
+                      .filter((loc) => loc.isActive)
+                      .map((loc) => (
+                        <option key={loc.code} value={loc.code}>
+                          {loc.code} — {loc.name}
+                        </option>
+                      ))}
+                  </select>
+                  <ScanQueuePanel
+                    queue={reconcileQueue}
+                    tone="emerald"
+                    emptyHint="Brak pozycji — zacznij skanowac produkty na wieszaku."
+                    onClear={clearCurrentScanSession}
+                    onAdjustQty={setReconcileQueueLineQty}
+                    onRemove={removeReconcileQueueLine}
+                  />
+                  <button
+                    type="button"
+                    className="mt-4 w-full rounded-2xl bg-teal-700 py-3.5 text-sm font-bold text-white shadow-md active:scale-[0.99] disabled:opacity-50"
+                    disabled={reconcileBusy || reconcileQueue.length === 0}
+                    onClick={() => requestReconcileSave()}
+                  >
+                    {reconcileBusy ? "Zapisywanie…" : "Zapisz aktualny stan lokalizacji"}
+                  </button>
+                </details>
               </section>
             ) : null}
 
@@ -2708,7 +2950,7 @@ export default function Home() {
                 Skanuj
               </span>
             </button>
-            {operationMode !== "PREVIEW" && operationMode !== "RESTORE_FROM_TMP" ? (
+            {operationMode !== "PREVIEW" && operationMode !== "RESTORE_FROM_TMP" && operationMode !== "RECONCILE" ? (
             <button
               type="button"
               className="flex-1 rounded-xl border-2 border-blue-300/90 bg-white py-3.5 text-sm font-bold text-blue-900 shadow-sm active:scale-[0.98]"
@@ -2718,20 +2960,33 @@ export default function Home() {
                   void submitAddBatch();
                   return;
                 }
-                if (operationMode === "RECONCILE" && reconcileQueue.length > 0) {
-                  requestReconcileSave();
+                if (operationMode === "RECONCILE") {
+                  if (replenishInventoryOpen && reconcileQueue.length > 0) {
+                    requestReconcileSave();
+                    return;
+                  }
+                  void loadReplenishmentRoutes();
+                  if (replenishRoutes.length > 0) {
+                    setMessage("Wybierz lokalizacje do uzupelnienia z listy powyzej — ustawimy przeniesienie Z → DO.");
+                  } else {
+                    setMessage(
+                      replenishPlanLoading
+                        ? "Ladowanie planu uzupelnienia…"
+                        : "Brak lokalizacji do uzupelnienia. Odswiez plan lub sprawdz stany na zapleczu.",
+                    );
+                  }
                   return;
                 }
-                if (operationMode === "ADD" || operationMode === "RECONCILE") {
+                if (operationMode === "ADD") {
                   if (!activeLocationCode?.trim() && !toLocationCode.trim()) {
                     setError("Najpierw zeskanuj lub wybierz lokalizacje.");
                     return;
                   }
-                  if (!sku.trim() && (operationMode === "ADD" ? addQueue.length === 0 : reconcileQueue.length === 0)) {
+                  if (!sku.trim() && addQueue.length === 0) {
                     setError("Dodaj produkty do kolejki skanowaniem albo wpisz SKU.");
                     return;
                   }
-                  if (operationMode === "ADD") void submitMovement();
+                  void submitMovement();
                   return;
                 }
                 if (operationMode === "MOVE") {
@@ -2755,7 +3010,7 @@ export default function Home() {
                 void submitMovement();
               }}
             >
-              {operationMode === "MOVE" ? "Przenies…" : operationMode === "RECONCILE" ? "Aktualizuj…" : operationMode === "MOVE_TO_SALE" || operationMode === "SALE_FINALIZE" ? "Zapisz sprzedaz" : "Zapisz ruch"}
+              {operationMode === "MOVE" ? "Przenies…" : operationMode === "RECONCILE" ? "Uzupelnij…" : operationMode === "MOVE_TO_SALE" || operationMode === "SALE_FINALIZE" ? "Zapisz sprzedaz" : "Zapisz ruch"}
             </button>
             ) : null}
           </div>
@@ -2788,7 +3043,7 @@ export default function Home() {
               />
               <input
                 className="w-full rounded-2xl border border-blue-200 p-3"
-                placeholder="Nazwa"
+                placeholder="Nazwa (opcjonalnie — domyslnie jak kod)"
                 value={manualLocName}
                 onChange={(e) => setManualLocName(e.target.value)}
               />
@@ -2831,7 +3086,7 @@ export default function Home() {
                   porzadku i filtrow w przyszlosci.
                 </p>
               </div>
-              {error ? <p className="text-sm text-red-600">{error}</p> : null}
+              {manualLocError ? <p className="text-sm font-medium text-red-600">{manualLocError}</p> : null}
               <button
                 type="submit"
                 disabled={manualLocBusy}
@@ -2884,7 +3139,7 @@ export default function Home() {
             </div>
             <p className="mt-2 text-sm text-blue-700">Lokalizacje, operatorzy, hasla.</p>
             <Link
-              href="/admin"
+              href="/admin#stock-anomalies"
               className="mt-4 flex w-full items-center justify-center rounded-2xl bg-blue-900 py-3 text-sm font-semibold text-white"
               onClick={() => setAdminOpen(false)}
             >
@@ -3083,11 +3338,54 @@ export default function Home() {
         </div>
       ) : null}
 
+      <AddDuplicateConfirmModal
+        open={addDuplicateConfirmOpen}
+        locationCode={addDuplicateLocation}
+        risks={addDuplicateRisks}
+        busy={addDuplicateBusy}
+        onCancel={() => {
+          setAddDuplicateConfirmOpen(false);
+          addDuplicatePendingRef.current = null;
+        }}
+        onConfirm={() => {
+          const run = addDuplicatePendingRef.current;
+          if (!run) {
+            setAddDuplicateConfirmOpen(false);
+            return;
+          }
+          setAddDuplicateBusy(true);
+          void run()
+            .catch(() => {})
+            .finally(() => {
+              setAddDuplicateBusy(false);
+              addDuplicatePendingRef.current = null;
+            });
+        }}
+      />
+
       {addVerifyPrompt ? (
         <div className="fixed inset-0 z-[72] flex items-end justify-center bg-blue-950/60 p-3 sm:items-center">
           <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
-            <h2 className="text-lg font-semibold text-emerald-900">Sprawdz stan modelu</h2>
+            <h2 className="text-lg font-semibold text-emerald-900">Produkt dodany</h2>
             <p className="mt-3 text-sm leading-relaxed text-emerald-950">
+              Dodano na lokalizację{" "}
+              <span className="font-mono font-semibold">{addVerifyPrompt.locationCode}</span>
+              {addVerifyPrompt.addedSkus.length > 0 ? (
+                <>
+                  {" "}
+                  kod(y):{" "}
+                  <span className="font-mono font-semibold">
+                    {addVerifyPrompt.addedSkus
+                      .map((line) =>
+                        line.qty > 1 ? `${line.sku.trim().toUpperCase()} ×${line.qty}` : line.sku.trim().toUpperCase(),
+                      )
+                      .join(", ")}
+                  </span>
+                  .
+                </>
+              ) : null}
+            </p>
+            <p className="mt-2 text-sm leading-relaxed text-emerald-950">
               Na tej lokalizacji powinno byc teraz{" "}
               <strong>{addVerifyPrompt.expectedQty}</strong> produktow z modelu{" "}
               <span className="font-mono font-semibold">{addVerifyPrompt.model}</span> —{" "}
@@ -3258,6 +3556,10 @@ export default function Home() {
           locations={locations}
           onClose={() => setStockOpen(false)}
           onStockChanged={() => void loadData()}
+          onOpenLocationPreview={(locationCode, models) => {
+            setStockOpen(false);
+            openLocationPreview(locationCode, models);
+          }}
         />
       ) : null}
 
@@ -3304,36 +3606,36 @@ export default function Home() {
                   <select
                     className="rounded-2xl border border-amber-200 bg-white p-3"
                     value={quickLocationZone}
-                    onChange={(e) => setQuickLocationZone(e.target.value as "SKLEP" | "ZAPLECZE")}
+                    onChange={(e) => {
+                      const zone = e.target.value as "SKLEP" | "ZAPLECZE";
+                      setQuickLocationZone(zone);
+                      setQuickLocationType(defaultLocationTypeForZone(zone));
+                    }}
                   >
-                    <option value="SKLEP">SKLEP</option>
-                    <option value="ZAPLECZE">ZAPLECZE</option>
+                    <option value="SKLEP">{zoneLabels.SKLEP}</option>
+                    <option value="ZAPLECZE">{zoneLabels.ZAPLECZE}</option>
                   </select>
                   <select
                     className="rounded-2xl border border-amber-200 bg-white p-3"
                     value={quickLocationType}
-                    onChange={(e) =>
-                      setQuickLocationType(
-                        e.target.value as
-                          | "DISPLAY"
-                          | "BUFFER"
-                          | "RESERVED"
-                          | "BACKROOM_BOX"
-                          | "BACKROOM_SHELF"
-                          | "INACTIVE",
-                      )
-                    }
+                    onChange={(e) => setQuickLocationType(e.target.value as LocationType)}
                   >
-                    <option value="DISPLAY">DISPLAY</option>
-                    <option value="BUFFER">BUFFER</option>
-                    <option value="RESERVED">RESERVED</option>
-                    <option value="BACKROOM_BOX">BACKROOM_BOX</option>
-                    <option value="BACKROOM_SHELF">BACKROOM_SHELF</option>
-                    <option value="INACTIVE">INACTIVE</option>
+                    {(Object.keys(locationTypeLabels) as LocationType[]).map((type) => (
+                      <option key={type} value={type}>
+                        {formatLocationType(type)}
+                      </option>
+                    ))}
                   </select>
                 </div>
-                <button className="w-full rounded-2xl bg-amber-700 p-3 font-semibold text-white" type="submit">
-                  Zapisz nowa lokalizacje
+                {quickLocationError ? (
+                  <p className="text-sm font-medium text-red-700">{quickLocationError}</p>
+                ) : null}
+                <button
+                  className="w-full rounded-2xl bg-amber-700 p-3 font-semibold text-white disabled:opacity-50"
+                  type="submit"
+                  disabled={quickLocationBusy}
+                >
+                  {quickLocationBusy ? "Zapisywanie…" : "Zapisz nowa lokalizacje"}
                 </button>
               </form>
             ) : (

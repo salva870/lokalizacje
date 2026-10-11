@@ -1,14 +1,7 @@
 import { NextResponse } from "next/server";
-import { z } from "zod";
 import { getSession, requireRole } from "@/lib/auth";
 import { createLocation, listLocations } from "@/lib/data";
-
-const createLocationSchema = z.object({
-  code: z.string().min(2).max(64).regex(/^[A-Za-z0-9_-]+$/),
-  name: z.string().min(2).max(120),
-  parentZone: z.enum(["SKLEP", "ZAPLECZE"]),
-  locationType: z.enum(["DISPLAY", "BUFFER", "RESERVED", "BACKROOM_BOX", "BACKROOM_SHELF", "INACTIVE"]),
-});
+import { createLocationSchema, formatZodLocationError } from "@/lib/locationSchemas";
 
 export async function GET() {
   try {
@@ -36,10 +29,13 @@ export async function POST(request: Request) {
     const body = await request.json();
     const parsed = createLocationSchema.safeParse(body);
     if (!parsed.success) {
-      return NextResponse.json({ error: "Niepoprawne dane lokalizacji" }, { status: 400 });
+      return NextResponse.json({ error: formatZodLocationError(parsed.error) }, { status: 400 });
     }
 
-    const location = await createLocation(parsed.data);
+    const location = await createLocation({
+      ...parsed.data,
+      code: parsed.data.code.toUpperCase(),
+    });
     return NextResponse.json({ item: location }, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Blad tworzenia lokalizacji";

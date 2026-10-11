@@ -76,6 +76,8 @@ Przy auto-wyborze (sklep + zaplecze) picklista pokazuje **domyślną lokalizacj�
 
 Skanowanie SKU na aktywnej lokalizacji — zwiększa stan.
 
+Po zapisie komunikat i toast zawierają **kod produktu (SKU)** oraz lokalizację. Warstwa „Sprawdź stan modelu” (gdy model był już na wieszaku) pokazuje dodane kody przed linkiem do podglądu.
+
 ### Przenieś (`MOVE`)
 
 Przeniesienie SKU z lokalizacji **Z** do **DO**. Możliwy wybór modeli z listy bez skanowania.
@@ -86,7 +88,11 @@ Przenosi **cały stan** z jednej lokalizacji do drugiej.
 
 ### Uzgodnij (`RECONCILE`)
 
-Ustawia stan na lokalizacji na wartość z kolejki skanów (inwentaryzacja).
+Ustawia stan na lokalizacji na wartość z kolejki skanów (inwentaryzacja). Kafelek **Uzupelnij stan** jest w jednym wierszu z **Podglad**. Lista proponuje trasy Z→DO (zaplecze → ekspozycja); kliknięcie włącza tryb **Przenies** z ustawionymi lokalizacjami. Pełna inwentaryzacja (skan całej lokalizacji) jest w sekcji zwiniętej pod listą. Aktywna operacja jest przypięta na górze ekranu (środek).
+
+### Uzupełnianie ekspozycji (plan ze zaplecza)
+
+Panel **Stany** → zakładka **Uzupełnianie**: plan przeniesień z zaplecza na wieszaki w sklepie (wg docelowej liczby sztuk na rozmiar). Status kroków (pobranie / powieszenie) jest zapisywany lokalnie w przeglądarce. Docelową ekspozycję per model można zmienić w tej zakładce (tabela `model_shop_display_target`).
 
 ### Sprzedaż
 
