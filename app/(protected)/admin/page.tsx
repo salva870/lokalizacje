@@ -4,6 +4,7 @@ import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 import { LocationOrderPanel } from "@/app/components/LocationOrderPanel";
 import { StockAnomalyAdminPanel } from "@/app/components/StockAnomalyAdminPanel";
+import { UsersAdminPanel } from "@/app/components/UsersAdminPanel";
 import {
   defaultLocationTypeForZone,
   defaultLocationTypeLabels,
@@ -28,7 +29,6 @@ export default function AdminPage() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [locations, setLocations] = useState<LocationRow[]>([]);
   const [stockRows, setStockRows] = useState<Array<{ locationCode: string; sku: string; qty: number }>>([]);
-  const [operators, setOperators] = useState<Array<{ id: string; login: string; role: string }>>([]);
   const [newLocationCode, setNewLocationCode] = useState("");
   const [newLocationName, setNewLocationName] = useState("");
   const [newLocationZone, setNewLocationZone] = useState<Zone>("SKLEP");
@@ -36,15 +36,6 @@ export default function AdminPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [locationFormError, setLocationFormError] = useState<string | null>(null);
   const [locationFormBusy, setLocationFormBusy] = useState(false);
-  const [newOperatorLogin, setNewOperatorLogin] = useState("");
-  const [newOperatorPassword, setNewOperatorPassword] = useState("");
-  const [operatorMessage, setOperatorMessage] = useState<string | null>(null);
-  const [resetOperatorId, setResetOperatorId] = useState("");
-  const [resetPassword, setResetPassword] = useState("");
-  const [resetMessage, setResetMessage] = useState<string | null>(null);
-  const [roleOperatorId, setRoleOperatorId] = useState("");
-  const [roleValue, setRoleValue] = useState<"ADMIN" | "OPERATOR">("OPERATOR");
-  const [roleMessage, setRoleMessage] = useState<string | null>(null);
   const [editingCode, setEditingCode] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editZone, setEditZone] = useState<Zone>("SKLEP");
@@ -88,12 +79,6 @@ export default function AdminPage() {
       setStockRows(stockData.stock ?? []);
     } else {
       setStockRows([]);
-    }
-
-    const opRes = await fetch("/api/admin/operators");
-    if (opRes.ok) {
-      const opData = await opRes.json();
-      setOperators(opData.items ?? []);
     }
 
     setReady(true);
@@ -213,80 +198,6 @@ export default function AdminPage() {
     await load();
   }
 
-  async function createOperator(event: FormEvent) {
-    event.preventDefault();
-    setOperatorMessage(null);
-    const response = await fetch("/api/admin/operators", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        login: newOperatorLogin,
-        password: newOperatorPassword,
-        role: "OPERATOR",
-      }),
-    });
-    const data = await response.json();
-    if (!response.ok) {
-      setOperatorMessage(data.error ?? "Nie udalo sie utworzyc uzytkownika.");
-      return;
-    }
-    setOperatorMessage("Uzytkownik utworzony.");
-    setNewOperatorLogin("");
-    setNewOperatorPassword("");
-    await load();
-  }
-
-  async function resetOperatorPassword(event: FormEvent) {
-    event.preventDefault();
-    setResetMessage(null);
-    if (!resetOperatorId) {
-      setResetMessage("Wybierz uzytkownika.");
-      return;
-    }
-    const response = await fetch(`/api/admin/operators/${resetOperatorId}/password`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: resetPassword }),
-    });
-    const data = await response.json();
-    if (!response.ok) {
-      setResetMessage(data.error ?? "Nie udalo sie zmienic hasla.");
-      return;
-    }
-    setResetMessage("Haslo zmienione.");
-    setResetPassword("");
-  }
-
-  async function changeOperatorRole(event: FormEvent) {
-    event.preventDefault();
-    setRoleMessage(null);
-    if (!roleOperatorId) {
-      setRoleMessage("Wybierz uzytkownika.");
-      return;
-    }
-    const target = operators.find((operator) => operator.id === roleOperatorId);
-    const roleLabel = roleValue === "ADMIN" ? "administratora" : "operatora";
-    if (
-      !window.confirm(
-        `Nadac uzytkownikowi ${target?.login ?? ""} uprawnienia: ${roleLabel}?`,
-      )
-    ) {
-      return;
-    }
-    const response = await fetch(`/api/admin/operators/${encodeURIComponent(roleOperatorId)}/role`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ role: roleValue }),
-    });
-    const data = await response.json();
-    if (!response.ok) {
-      setRoleMessage(data.error ?? "Nie udalo sie zmienic uprawnien.");
-      return;
-    }
-    setRoleMessage(`Uprawnienia zmienione na ${roleValue === "ADMIN" ? "administrator" : "operator"}.`);
-    await load();
-  }
-
   if (!ready || !isAdmin) {
     return (
       <main className="min-h-screen bg-blue-50 px-3 py-4">
@@ -300,7 +211,7 @@ export default function AdminPage() {
       <div className="mx-auto max-w-lg space-y-4">
         <header className="rounded-xl bg-white p-4 shadow">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <h1 className="text-xl font-semibold text-blue-900">Administrator</h1>
+            <h1 className="text-xl font-semibold text-blue-900">Panel administratora</h1>
             <nav className="flex flex-wrap gap-2 text-sm">
               <Link className="rounded-lg border border-blue-200 px-3 py-1.5 text-blue-800 hover:bg-blue-50" href="/">
                 Panel skanowania
@@ -311,9 +222,13 @@ export default function AdminPage() {
             </nav>
           </div>
           <p className="mt-2 text-sm text-blue-700">
-            Zarzadzanie uzytkownikami (tylko administrator) oraz lokalizacjami. Dziala na telefonie i na komputerze.
+            Uzytkownicy, lokalizacje, eksport i anomalie stanow. Dziala na telefonie i na komputerze.
           </p>
         </header>
+
+        <section className="rounded-xl bg-white p-4 shadow">
+          <UsersAdminPanel />
+        </section>
 
         <StockAnomalyAdminPanel />
 
@@ -330,113 +245,6 @@ export default function AdminPage() {
           >
             Pobierz CSV stanów magazynowych
           </a>
-        </section>
-
-        <section className="rounded-xl bg-white p-4 shadow">
-          <h2 className="font-medium text-blue-900">Uzytkownicy (operatorzy)</h2>
-          <div className="mt-3 max-h-48 overflow-y-auto rounded-lg border border-blue-100 text-sm">
-            {operators.length === 0 ? (
-              <p className="p-3 text-blue-700">Brak uzytkownikow lub brak polaczenia z Supabase.</p>
-            ) : (
-              <ul className="divide-y divide-blue-100">
-                {operators.map((operator) => (
-                  <li key={operator.id} className="px-3 py-2">
-                    <span className="font-semibold text-blue-900">{operator.login}</span>
-                    <span className="text-blue-700">
-                      {" "}
-                      — {operator.role === "ADMIN" ? "Administrator" : "Operator"}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          <form className="mt-4 space-y-3" onSubmit={createOperator}>
-            <h3 className="text-sm font-medium text-blue-900">Nowy operator</h3>
-            <input
-              className="w-full rounded-lg border border-blue-200 p-2"
-              placeholder="Login"
-              value={newOperatorLogin}
-              onChange={(e) => setNewOperatorLogin(e.target.value)}
-            />
-            <input
-              className="w-full rounded-lg border border-blue-200 p-2"
-              type="password"
-              placeholder="Haslo startowe"
-              value={newOperatorPassword}
-              onChange={(e) => setNewOperatorPassword(e.target.value)}
-            />
-            {operatorMessage ? <p className="text-sm text-blue-800">{operatorMessage}</p> : null}
-            <button className="w-full rounded-lg bg-blue-700 p-3 font-medium text-white" type="submit">
-              Utworz operatora
-            </button>
-          </form>
-
-          <form className="mt-6 space-y-3" onSubmit={resetOperatorPassword}>
-            <h3 className="text-sm font-medium text-blue-900">Reset hasla operatora</h3>
-            <select
-              className="w-full rounded-lg border border-blue-200 p-2"
-              value={resetOperatorId}
-              onChange={(e) => setResetOperatorId(e.target.value)}
-            >
-              <option value="">Wybierz uzytkownika</option>
-              {operators.map((operator) => (
-                <option key={operator.id} value={operator.id}>
-                  {operator.login}
-                </option>
-              ))}
-            </select>
-            <input
-              className="w-full rounded-lg border border-blue-200 p-2"
-              type="password"
-              placeholder="Nowe haslo"
-              value={resetPassword}
-              onChange={(e) => setResetPassword(e.target.value)}
-            />
-            {resetMessage ? <p className="text-sm text-blue-800">{resetMessage}</p> : null}
-            <button className="w-full rounded-lg border border-blue-300 bg-white p-3 font-medium text-blue-900" type="submit">
-              Ustaw nowe haslo
-            </button>
-          </form>
-
-          <form className="mt-6 space-y-3" onSubmit={changeOperatorRole}>
-            <h3 className="text-sm font-medium text-blue-900">Zmiana uprawnien</h3>
-            <p className="text-xs text-blue-700">
-              Tylko administrator moze nadac lub odebrac role administratora. Nie mozna odebrac roli ostatniemu adminowi.
-            </p>
-            <select
-              className="w-full rounded-lg border border-blue-200 p-2"
-              value={roleOperatorId}
-              onChange={(e) => {
-                const id = e.target.value;
-                setRoleOperatorId(id);
-                const selected = operators.find((operator) => operator.id === id);
-                if (selected?.role === "ADMIN" || selected?.role === "OPERATOR") {
-                  setRoleValue(selected.role);
-                }
-              }}
-            >
-              <option value="">Wybierz uzytkownika</option>
-              {operators.map((operator) => (
-                <option key={operator.id} value={operator.id}>
-                  {operator.login} ({operator.role === "ADMIN" ? "admin" : "operator"})
-                </option>
-              ))}
-            </select>
-            <select
-              className="w-full rounded-lg border border-blue-200 p-2"
-              value={roleValue}
-              onChange={(e) => setRoleValue(e.target.value as "ADMIN" | "OPERATOR")}
-            >
-              <option value="OPERATOR">Operator</option>
-              <option value="ADMIN">Administrator</option>
-            </select>
-            {roleMessage ? <p className="text-sm text-blue-800">{roleMessage}</p> : null}
-            <button className="w-full rounded-lg border border-blue-300 bg-white p-3 font-medium text-blue-900" type="submit">
-              Zapisz uprawnienia
-            </button>
-          </form>
         </section>
 
         <section className="rounded-xl bg-white p-4 shadow">

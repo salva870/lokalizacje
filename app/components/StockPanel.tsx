@@ -42,7 +42,7 @@ type StockPanelProps = {
   stock: StockRow[];
   locations: StockPanelLocation[];
   onClose: () => void;
-  onStockChanged?: () => void;
+  onStockChanged?: (patch?: { locationCode: string; sku: string; qty: number }) => void;
   onOpenLocationPreview?: (locationCode: string, models: string[]) => void;
 };
 
@@ -450,11 +450,14 @@ export function StockPanel({ stock, locations, onClose, onStockChanged, onOpenLo
               await saveOrder(locationCode, nextModels, true);
             }
           }
+          const nextQty = Math.max(0, currentQty - qtyToRemove);
           setSaveMessage(
-            removeAll
-              ? `Usunieto ${sku} z ${locationCode}.`
+            nextQty <= 0
+              ? `Zdjeto ostatnia sztuke ${sku} z ${locationCode}.`
               : `Zdjeto 1 szt. ${sku} z ${locationCode}.`,
           );
+          onStockChanged?.({ locationCode, sku, qty: nextQty });
+          return;
         } else {
           const risks = findModelDuplicateAddRisks(stock, locationCode, [{ sku, qty: 1 }]);
           if (risks.length > 0) {
@@ -472,7 +475,7 @@ export function StockPanel({ stock, locations, onClose, onStockChanged, onOpenLo
                 await saveOrder(locationCode, [...orderedModels, model], true);
               }
               setSaveMessage(`Dodano 1 szt. ${sku} na ${locationCode}.`);
-              onStockChanged?.();
+              onStockChanged?.({ locationCode, sku, qty: currentQty + 1 });
             };
             setDuplicateModalOpen(true);
             return;
@@ -487,8 +490,9 @@ export function StockPanel({ stock, locations, onClose, onStockChanged, onOpenLo
             await saveOrder(locationCode, [...orderedModels, model], true);
           }
           setSaveMessage(`Dodano 1 szt. ${sku} na ${locationCode}.`);
+          onStockChanged?.({ locationCode, sku, qty: currentQty + 1 });
+          return;
         }
-        onStockChanged?.();
       } catch (error) {
         if (error instanceof Error && error.message === "DUPLICATE_ADD_BLOCKED") return;
         setSaveMessage(error instanceof Error ? error.message : "Nie udalo sie zapisac zmiany.");

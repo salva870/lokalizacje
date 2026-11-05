@@ -59,7 +59,7 @@ export const movementVisuals: Record<MovementType, MovementVisual> = {
   },
   RESTORE_FROM_TMP: {
     label: "Przywroc z TMP",
-    hint: "Wskazowka gdzie odlozyc po przymierzaniu (bez zmiany stanu)",
+    hint: "Podpowiedz wieszaka dla sztuk z bałaganu — bez zmiany stanu",
     icon: (
       <svg {...svgProps} aria-hidden>
         <path d="M3 12a9 9 0 1 0 3-6.7" />

@@ -9,7 +9,10 @@ export async function GET() {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
     const [stock, recentMovements] = await Promise.all([getCurrentStock(), getRecentMovements(50)]);
-    return NextResponse.json({ stock, recentMovements });
+    return NextResponse.json(
+      { stock, recentMovements },
+      { headers: { "Cache-Control": "no-store" } },
+    );
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Blad odczytu stanu" },

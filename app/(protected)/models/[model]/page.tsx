@@ -30,16 +30,23 @@ export default function ModelStockPage() {
   const [duplicateBusy, setDuplicateBusy] = useState(false);
   const duplicatePendingRef = useRef<null | (() => Promise<void>)>(null);
   const busyRef = useRef(false);
+  const stockLoadSeqRef = useRef(0);
 
   const locationTypes = useMemo(() => buildLocationTypeMap(locations), [locations]);
 
   async function loadStock() {
-    const [stockRes, locationsRes] = await Promise.all([fetch("/api/stock"), fetch("/api/locations")]);
+    const seq = ++stockLoadSeqRef.current;
+    const [stockRes, locationsRes] = await Promise.all([
+      fetch("/api/stock", { cache: "no-store" }),
+      fetch("/api/locations", { cache: "no-store" }),
+    ]);
+    if (seq !== stockLoadSeqRef.current) return true;
     if (!stockRes.ok) {
       setError("Nie udalo sie pobrac stanow.");
       return false;
     }
     const stockData = await stockRes.json();
+    if (seq !== stockLoadSeqRef.current) return true;
     setStock(stockData.stock ?? []);
     if (locationsRes.ok) {
       const locationsData = await locationsRes.json();
@@ -118,8 +125,19 @@ export default function ModelStockPage() {
         if (!response.ok) {
           throw new Error(typeof data.error === "string" ? data.error : "Nie udalo sie zapisac zmiany.");
         }
+        const nextQty = delta < 0 ? Math.max(0, currentQty - 1) : currentQty + 1;
+        stockLoadSeqRef.current += 1;
+        setStock((prev) => {
+          const loc = locationCode.trim().toUpperCase();
+          const skuNorm = sku.trim().toUpperCase();
+          const rest = prev.filter((row) => row.locationCode.toUpperCase() !== loc || row.sku.toUpperCase() !== skuNorm);
+          if (nextQty <= 0) return rest;
+          return [...rest, { locationCode: loc, sku: skuNorm, qty: nextQty }];
+        });
         await loadStock();
-        setSaveMessage(delta < 0 ? `Zdjeto 1 szt. z ${locationCode}.` : `Dodano 1 szt. na ${locationCode}.`);
+        setSaveMessage(
+          nextQty <= 0 ? `Zdjeto ostatnia sztuke z ${locationCode}.` : delta < 0 ? `Zdjeto 1 szt. z ${locationCode}.` : `Dodano 1 szt. na ${locationCode}.`,
+        );
       } catch (err) {
         setSaveMessage(err instanceof Error ? err.message : "Nie udalo sie zapisac zmiany.");
       } finally {

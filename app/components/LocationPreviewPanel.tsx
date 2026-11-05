@@ -70,7 +70,7 @@ type LocationPreviewPanelProps = {
   highlightSku?: string | null;
   /** Pokaz tylko wybrane modele (np. po dodaniu stanu). */
   filterModels?: string[];
-  onStockChanged?: () => void;
+  onStockChanged?: (patch?: { locationCode: string; sku: string; qty: number }) => void;
 };
 
 export function LocationPreviewPanel({
@@ -279,6 +279,14 @@ export function LocationPreviewPanel({
         if (!response.ok) {
           throw new Error(typeof data.error === "string" ? data.error : "Nie udalo sie zapisac zmiany.");
         }
+        const nextQty =
+          delta === "remove" || (typeof delta === "number" && delta < 0)
+            ? Math.max(0, currentQty - qtyToRemove)
+            : currentQty + addQty;
+        setSaveMessage(
+          nextQty <= 0 ? `Zdjeto ostatnia sztuke ${sku}.` : delta === -1 ? `Zdjeto 1 szt.` : `Dodano 1 szt.`,
+        );
+        onStockChanged?.({ locationCode, sku, qty: nextQty });
         const orderedModels = modelGroups.map((group) => group.model);
         const remainingModelQty =
           (modelGroups.find((group) => group.model === model)?.totalQty ?? 0) +
@@ -291,8 +299,6 @@ export function LocationPreviewPanel({
         } else if (typeof delta === "number" && delta > 0 && !orderedModels.includes(model)) {
           await saveOrder([...orderedModels, model], true);
         }
-        setSaveMessage(removeAll ? `Usunieto ${sku}.` : delta === -1 ? `Zdjeto 1 szt.` : `Dodano 1 szt.`);
-        onStockChanged?.();
       } catch (error) {
         setSaveMessage(error instanceof Error ? error.message : "Nie udalo sie zapisac zmiany.");
       } finally {

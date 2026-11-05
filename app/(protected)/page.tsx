@@ -14,6 +14,7 @@ import { MoveModelPicker } from "@/app/components/MoveModelPicker";
 import { MovementIcon, operationVisuals, type OperationMode } from "@/app/components/MovementIcon";
 import { StockAnomalyHomeBanner } from "@/app/components/StockAnomalyHomeBanner";
 import { StockPanel } from "@/app/components/StockPanel";
+import { UsersAdminPanel } from "@/app/components/UsersAdminPanel";
 import { LocationOrderPanel } from "@/app/components/LocationOrderPanel";
 import { AddDuplicateConfirmModal } from "@/app/components/AddDuplicateConfirmModal";
 import { findDuplicateAddRisks, type DuplicateAddRisk } from "@/lib/addDuplicateGuard";
@@ -29,6 +30,7 @@ import { buildLocationTypeMap } from "@/lib/stockClassification";
 import { resolveSaleLineLocation, type SaleQueueLine } from "@/lib/saleQueue";
 import { formatAddSuccessMessage } from "@/lib/formatAddSummary";
 import type { ReplenishmentPlan } from "@/lib/replenishment";
+import { ReplenishmentRoutePlanCard } from "@/app/components/ReplenishmentRoutePlanCard";
 import { groupReplenishmentRoutes, type ReplenishmentRouteSuggestion } from "@/lib/replenishmentRoutes";
 import type { LocationType, Zone } from "@/lib/types";
 
@@ -156,8 +158,6 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [restoreQueue, setRestoreQueue] = useState<RestoreQueueEntry[]>([]);
-  const [restoreNoLocationSku, setRestoreNoLocationSku] = useState<string | null>(null);
-  const [restoreAssignSku, setRestoreAssignSku] = useState<string | null>(null);
   const [activeLocationCode, setActiveLocationCode] = useState<string | null>(null);
   const [pendingUnknownLocationCode, setPendingUnknownLocationCode] = useState<string | null>(null);
   const [quickLocationName, setQuickLocationName] = useState("");
@@ -169,6 +169,7 @@ export default function Home() {
   const [replenishRoutes, setReplenishRoutes] = useState<ReplenishmentRouteSuggestion[]>([]);
   const [replenishPlanLoading, setReplenishPlanLoading] = useState(false);
   const [replenishInventoryOpen, setReplenishInventoryOpen] = useState(false);
+  const [activeReplenishRoute, setActiveReplenishRoute] = useState<ReplenishmentRouteSuggestion | null>(null);
 
   const [addVerifyPrompt, setAddVerifyPrompt] = useState<{
     locationCode: string;
@@ -245,6 +246,7 @@ export default function Home() {
   const handleScanTextRef = useRef<(text: string) => void>(() => {});
   const movementGridRef = useRef<HTMLDivElement | null>(null);
   const draftHydratedRef = useRef(false);
+  const stockLoadSeqRef = useRef(0);
   const draftSaveTimerRef = useRef<number | null>(null);
 
   const [manualLocationOpen, setManualLocationOpen] = useState(false);
@@ -257,12 +259,25 @@ export default function Home() {
   const [quickLocationBusy, setQuickLocationBusy] = useState(false);
   const [quickLocationError, setQuickLocationError] = useState<string | null>(null);
 
+  const patchStockQty = useCallback((patch: { locationCode: string; sku: string; qty: number }) => {
+    stockLoadSeqRef.current += 1;
+    const loc = patch.locationCode.trim().toUpperCase();
+    const sku = patch.sku.trim().toUpperCase();
+    const qty = Math.max(0, Math.floor(Number(patch.qty) || 0));
+    setStock((prev) => {
+      const rest = prev.filter((row) => row.locationCode.toUpperCase() !== loc || row.sku.toUpperCase() !== sku);
+      if (qty <= 0) return rest;
+      return [...rest, { locationCode: loc, sku, qty }];
+    });
+  }, []);
+
   async function loadData(includeDraft = false) {
+    const seq = ++stockLoadSeqRef.current;
     const withTimeout = async (url: string, timeoutMs = 10000) => {
       const controller = new AbortController();
       const timer = window.setTimeout(() => controller.abort(), timeoutMs);
       try {
-        return await fetch(url, { signal: controller.signal });
+        return await fetch(url, { signal: controller.signal, cache: "no-store" });
       } finally {
         window.clearTimeout(timer);
       }
@@ -288,6 +303,7 @@ export default function Home() {
       const meData = await meRes.json();
       const locationsData = await locationsRes.json();
       const stockData = await stockRes.json();
+      if (seq !== stockLoadSeqRef.current) return;
       setUserRole(meData?.user?.role ?? null);
       setLocations(locationsData.items ?? []);
       setStock(stockData.stock ?? []);
@@ -330,6 +346,7 @@ export default function Home() {
       }
       setReady(true);
     } catch {
+      if (seq !== stockLoadSeqRef.current) return;
       setError("Nie udalo sie wczytac danych. Odswiez strone.");
       if (includeDraft) draftHydratedRef.current = true;
       setReady(true);
@@ -618,8 +635,7 @@ export default function Home() {
             : data.suggestedLocation;
           pushScanToast(`${skuNorm} → ${label}`);
         } else {
-          pushScanToast(`${skuNorm}: brak lokalizacji`);
-          setRestoreNoLocationSku(skuNorm);
+          pushScanToast(`${skuNorm}: brak wieszaka`);
         }
       } catch {
         setError("Blad polaczenia przy pobieraniu sugestii lokalizacji.");
@@ -630,12 +646,6 @@ export default function Home() {
     },
     [pushScanToast],
   );
-
-  const beginRestoreAssignFlow = useCallback((skuNorm: string) => {
-    setRestoreNoLocationSku(null);
-    setRestoreAssignSku(skuNorm);
-    setScannerStatus("Zeskanuj lokalizacje, do ktorej chcesz dodac produkt.");
-  }, []);
 
   const beginScanCooldown = useCallback(() => {
     const until = Date.now() + SCAN_COOLDOWN_MS;
@@ -665,6 +675,7 @@ export default function Home() {
     if (next !== "MOVE") {
       setMoveTargetOpen(false);
       setMoveTargetSelectedCode(null);
+      setActiveReplenishRoute(null);
     }
     if (next === "ADD" || next === "RECONCILE") {
       setFromLocationCode("");
@@ -705,13 +716,20 @@ export default function Home() {
     (route: ReplenishmentRouteSuggestion) => {
       setError(null);
       setMessage(null);
-      setMoveQueue([]);
+      setActiveReplenishRoute(route);
+      const qtyBySku = new Map<string, number>();
+      for (const transfer of route.transfers) {
+        const sku = transfer.sku.trim().toUpperCase();
+        if (!sku) continue;
+        qtyBySku.set(sku, (qtyBySku.get(sku) ?? 0) + transfer.qty);
+      }
+      setMoveQueue([...qtyBySku.entries()].map(([sku, qty]) => ({ sku, qty })));
       setFromLocationCode(route.fromLocationCode);
       setToLocationCode(route.toLocationCode);
       setActiveLocationCode(route.fromLocationCode);
       changeOperationMode("MOVE");
       setMessage(
-        `Uzupelnianie ${route.toLocationCode}: zaznacz rozmiary na ${route.fromLocationCode} (${route.totalQty} szt. w planie) lub skanuj produkty.`,
+        `Plan uzupelnienia ${route.toLocationCode}: ${route.totalQty} szt. z ${route.fromLocationCode}. Lista ponizej — zatwierdz przeniesienie lub skanuj.`,
       );
     },
     [changeOperationMode],
@@ -733,22 +751,6 @@ export default function Home() {
       setActiveLocationCode(code);
       setToLocationCode(code);
       changeOperationMode("PREVIEW");
-    },
-    [changeOperationMode],
-  );
-
-  const completeRestoreAssignToAdd = useCallback(
-    (skuToAdd: string, locationCode: string) => {
-      setRestoreAssignSku(null);
-      setRestoreNoLocationSku(null);
-      changeOperationMode("ADD");
-      setAddQueue([{ sku: skuToAdd, qty: 1 }]);
-      setActiveLocationCode(locationCode);
-      setToLocationCode(locationCode);
-      setSku(skuToAdd);
-      addSkuOccurrenceRef.current.set(skuToAdd, 1);
-      setMessage(`Dodaj do lokalizacji ${locationCode} — potwierdz zapis.`);
-      setScannerStatus(null);
     },
     [changeOperationMode],
   );
@@ -789,27 +791,22 @@ export default function Home() {
       }
 
       if (operationMode === "RESTORE_FROM_TMP") {
-        if (restoreAssignSku) {
-          setScannerStatus("Zeskanuj lokalizacje docelowa — nie produktu.");
-          return true;
-        }
         const lineQty = Math.max(1, qty);
         let nextToast = skuNorm;
         setRestoreQueue((prev) => {
           const idx = prev.findIndex((row) => row.sku === skuNorm);
           if (idx >= 0) {
             const copy = [...prev];
-            copy[idx] = { ...copy[idx], qty: copy[idx].qty + lineQty, loading: true };
+            copy[idx] = { ...copy[idx], qty: copy[idx].qty + lineQty };
             const occ = (addSkuOccurrenceRef.current.get(skuNorm) ?? 0) + 1;
             addSkuOccurrenceRef.current.set(skuNorm, occ);
             nextToast = occ === 1 ? skuNorm : `${skuNorm} (${occ})`;
-            queueMicrotask(() => void attachRestoreSuggestion(skuNorm));
             return copy;
           }
           addSkuOccurrenceRef.current.set(skuNorm, 1);
           nextToast = skuNorm;
           queueMicrotask(() => void attachRestoreSuggestion(skuNorm));
-          return [{ sku: skuNorm, qty: lineQty, loading: true, model: parseSkuModel(skuNorm).model }];
+          return [...prev, { sku: skuNorm, qty: lineQty, loading: true, model: parseSkuModel(skuNorm).model }];
         });
         queueMicrotask(() => pushScanToast(nextToast));
         setSku(skuNorm);
@@ -879,7 +876,7 @@ export default function Home() {
 
       return false;
     },
-    [appendToMoveQueue, attachRestoreSuggestion, moveSourceLocationCode, moveTargetLocationCode, operationMode, pushScanToast, qty, restoreAssignSku, toLocationCode],
+    [appendToMoveQueue, attachRestoreSuggestion, moveSourceLocationCode, moveTargetLocationCode, operationMode, pushScanToast, qty, toLocationCode],
   );
 
   const removeRestoreQueueLine = useCallback((skuNorm: string) => {
@@ -1070,6 +1067,7 @@ export default function Home() {
         );
         playOperationSuccess("MOVE");
         setMoveQueue([]);
+        setActiveReplenishRoute(null);
         setMoveTargetOpen(false);
         setMoveConfirmOpen(false);
         setMoveTargetSelectedCode(null);
@@ -1108,6 +1106,7 @@ export default function Home() {
       setMessage(`Przeniesiono ${moveQueue.length} poz. z ${from} do ${to}.`);
       playOperationSuccess("MOVE");
       setMoveQueue([]);
+      setActiveReplenishRoute(null);
       setMoveTargetOpen(false);
       setMoveConfirmOpen(false);
       setMoveTargetSelectedCode(null);
@@ -1752,10 +1751,9 @@ export default function Home() {
 
       const resolvedLocation = resolveLocationCodeFromScan(text);
       if (resolvedLocation) {
-        if (restoreAssignSku) {
-          completeRestoreAssignToAdd(restoreAssignSku.trim().toUpperCase(), resolvedLocation.trim().toUpperCase());
-          stopScanner();
-          setPendingUnknownLocationCode(null);
+        if (operationMode === "RESTORE_FROM_TMP") {
+          setScannerStatus("To tylko podpowiedz wieszaka — skan lokalizacji nie zmienia stanu. Skanuj kolejne produkty.");
+          setMessage(`Podpowiedz: sprawdz wieszak ${resolvedLocation.trim().toUpperCase()} na liscie „Pokaz gdzie odwiesic”.`);
           beginScanCooldown();
           return;
         }
@@ -1818,10 +1816,6 @@ export default function Home() {
           handlePreviewProductScan(plainSku);
           return;
         }
-        if (restoreAssignSku) {
-          setScannerStatus("Zeskanuj lokalizacje docelowa — nie produktu.");
-          return;
-        }
         if (applyProductSkuScan(plainSku)) {
           beginScanCooldown();
           return;
@@ -1838,12 +1832,10 @@ export default function Home() {
     [
       applyProductSkuScan,
       beginScanCooldown,
-      completeRestoreAssignToAdd,
       fromLocationCode,
       handlePreviewProductScan,
       operationMode,
       resolveLocationCodeFromScan,
-      restoreAssignSku,
       stopScanner,
       toLocationCode,
     ],
@@ -2443,6 +2435,14 @@ export default function Home() {
 
             {operationMode === "MOVE" ? (
               <section className="mt-4 rounded-2xl border-2 border-blue-300/80 bg-white p-4 shadow-md">
+                {activeReplenishRoute ? (
+                  <div className="mb-4">
+                    <ReplenishmentRoutePlanCard
+                      route={activeReplenishRoute}
+                      onDismiss={() => setActiveReplenishRoute(null)}
+                    />
+                  </div>
+                ) : null}
                 <p className="text-sm font-semibold text-blue-900">Przenoszenie — kolejka</p>
                 <p className="mt-1 text-xs text-blue-700">
                   1) Zeskanuj lokalizacje Z (zrodlo), potem DO (cel). 2) Zaznacz modele na liscie albo skanuj
@@ -2569,8 +2569,8 @@ export default function Home() {
                   <div>
                     <p className="text-sm font-semibold text-teal-950">Uzupelnij ekspozycje</p>
                     <p className="mt-1 text-xs text-teal-800">
-                      Wybierz lokalizacje do uzupelnienia — ustawimy przeniesienie Z → DO. Potem zaznacz rozmiary lub
-                      skanuj produkty w trybie Przenies.
+                      Wybierz lokalizacje do uzupelnienia — zobaczysz liste modeli i rozmiarow do przeniesienia (skad →
+                      dokad), a kolejka przeniesienia uzupelni sie automatycznie.
                     </p>
                   </div>
                   <button
@@ -2709,8 +2709,9 @@ export default function Home() {
               <section className="mt-4 rounded-2xl border-2 border-cyan-400/70 bg-white p-4 shadow-md">
                 <p className="text-sm font-semibold text-cyan-950">Przywroc z TMP</p>
                 <p className="mt-1 text-xs text-cyan-800">
-                  Zeskanuj produkty z tymczasowej lokalizacji — aplikacja podpowie, gdzie odlozyc je na wieszaku
-                  (na podstawie innych rozmiarow tego samego modelu). Nie zmienia to stanu magazynowego.
+                  Zeskanuj kolejne sztuki z bałaganu. Aplikacja nie zmienia stanu i nie dopisuje nic na TMP. Lista
+                  zostaje w kolejności skanowania i przy każdym produkcie pokazuje wieszak oraz ile sztuk tego modelu
+                  powinno już na nim wisieć.
                 </p>
                 <RestoreQueuePanel
                   queue={restoreQueue}
@@ -2834,7 +2835,10 @@ export default function Home() {
                   locationTypes={locationTypeMap}
                   highlightSku={previewHighlightSku}
                   filterModels={previewFilterModels.length > 0 ? previewFilterModels : undefined}
-                  onStockChanged={() => void loadData()}
+                  onStockChanged={(patch) => {
+                    if (patch) patchStockQty(patch);
+                    void loadData();
+                  }}
                 />
               </section>
             ) : null}
@@ -2894,8 +2898,8 @@ export default function Home() {
                       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
                     </svg>
                   </span>
-                  <p className="mt-2 text-sm font-semibold">Admin</p>
-                  <p className="mt-1 text-xs text-blue-200">Lokalizacje, operatorzy</p>
+                  <p className="mt-2 text-sm font-semibold">Uzytkownicy</p>
+                  <p className="mt-1 text-xs text-blue-200">Loginy i hasla</p>
                 </button>
               ) : (
                 <button
@@ -3126,9 +3130,12 @@ export default function Home() {
 
       {adminOpen ? (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-blue-950/55 p-3 sm:items-center">
-          <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
-            <div className="flex items-start justify-between gap-2">
-              <h2 className="text-lg font-semibold text-blue-900">Administrator</h2>
+          <div className="flex max-h-[min(92vh,880px)] w-full max-w-lg flex-col overflow-hidden rounded-3xl bg-white shadow-xl">
+            <div className="flex shrink-0 items-start justify-between gap-2 border-b border-blue-100 p-5 pb-3">
+              <div>
+                <h2 className="text-lg font-semibold text-blue-900">Zarzadzanie uzytkownikami</h2>
+                <p className="mt-1 text-sm text-blue-700">Dodawanie kont, zmiana hasel i uprawnien w LOC.</p>
+              </div>
               <button
                 type="button"
                 className="rounded-xl border border-blue-200 px-3 py-1.5 text-sm text-blue-900"
@@ -3137,14 +3144,18 @@ export default function Home() {
                 Zamknij
               </button>
             </div>
-            <p className="mt-2 text-sm text-blue-700">Lokalizacje, operatorzy, hasla.</p>
-            <Link
-              href="/admin#stock-anomalies"
-              className="mt-4 flex w-full items-center justify-center rounded-2xl bg-blue-900 py-3 text-sm font-semibold text-white"
-              onClick={() => setAdminOpen(false)}
-            >
-              Otworz panel admina
-            </Link>
+            <div className="min-h-0 flex-1 overflow-y-auto p-5 pt-3">
+              <UsersAdminPanel compact />
+            </div>
+            <div className="shrink-0 border-t border-blue-100 p-4">
+              <Link
+                href="/admin"
+                className="flex w-full items-center justify-center rounded-2xl border border-blue-200 bg-blue-50 py-3 text-sm font-semibold text-blue-900"
+                onClick={() => setAdminOpen(false)}
+              >
+                Pelny panel admina (lokalizacje, eksport…)
+              </Link>
+            </div>
           </div>
         </div>
       ) : null}
@@ -3241,38 +3252,6 @@ export default function Home() {
                   : moveTargetMode === "entire"
                     ? "Przenies cala lokalizacje"
                     : "Zatwierdz przeniesienie"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {restoreNoLocationSku ? (
-        <div className="fixed inset-0 z-[56] flex items-end justify-center bg-cyan-950/55 p-3 sm:items-center">
-          <div className="w-full max-w-md rounded-3xl bg-white p-5 shadow-xl">
-            <h2 className="text-lg font-semibold text-cyan-950">Brak lokalizacji dla modelu</h2>
-            <p className="mt-2 text-sm text-cyan-900">
-              Dla produktu <span className="font-mono font-semibold">{restoreNoLocationSku}</span> (
-              {parseSkuModel(restoreNoLocationSku).model}) nie znaleziono innych rozmiarow na lokalizacjach.
-            </p>
-            <p className="mt-2 text-sm text-cyan-800">Czy chcesz go dodac do jakiejs lokalizacji?</p>
-            <div className="mt-5 flex flex-col gap-2 sm:flex-row">
-              <button
-                type="button"
-                className="flex-1 rounded-2xl border border-cyan-200 py-3 text-sm font-semibold text-cyan-900"
-                onClick={() => setRestoreNoLocationSku(null)}
-              >
-                Nie teraz
-              </button>
-              <button
-                type="button"
-                className="flex-1 rounded-2xl bg-cyan-700 py-3 text-sm font-bold text-white"
-                onClick={() => {
-                  beginRestoreAssignFlow(restoreNoLocationSku);
-                  void openScanner();
-                }}
-              >
-                Tak, zeskanuj lokalizacje
               </button>
             </div>
           </div>
@@ -3555,7 +3534,10 @@ export default function Home() {
           stock={stock}
           locations={locations}
           onClose={() => setStockOpen(false)}
-          onStockChanged={() => void loadData()}
+          onStockChanged={(patch) => {
+            if (patch) patchStockQty(patch);
+            void loadData();
+          }}
           onOpenLocationPreview={(locationCode, models) => {
             setStockOpen(false);
             openLocationPreview(locationCode, models);
