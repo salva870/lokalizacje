@@ -202,6 +202,46 @@ Picklista synchronizuje:
 
 ---
 
+### `GET /api/integration/stock-export`
+
+Eksport realnych stanów per SKU i lokalizacja w JSON (odpowiednik CSV `lokalizacje-stany-*.csv`, te same reguły: `qty > 0`, wielkie litery, suma po lokalizacjach). Tylko odczyt.
+
+**Autoryzacja:** nagłówek `X-Loc-Integration-Key` (nigdy parametr w URL). Odpowiedź: `Cache-Control: no-store`.
+
+**Odpowiedź (fragment):**
+
+```json
+{
+  "schema": "loc.stock-export",
+  "version": 1,
+  "source": "LOC",
+  "generatedAt": "2026-11-05T18:00:00.000Z",
+  "itemCount": 1,
+  "locationCount": 2,
+  "totalQty": 5,
+  "items": [
+    {
+      "sku": "S-T-080-146",
+      "model": "S-T-080",
+      "size": "146",
+      "totalQty": 5,
+      "sellableQty": 2,
+      "damagedQty": 3,
+      "locations": [
+        { "locationCode": "USZKODZONE", "locationType": "DAMAGED", "damaged": true, "qty": 3 },
+        { "locationCode": "W1", "locationType": "DISPLAY", "damaged": false, "qty": 2 }
+      ]
+    }
+  ]
+}
+```
+
+- `totalQty` = `stan_magazynowy_sumaryczny_niezalezny_od_lokalizacji` z CSV.
+- `sellableQty` = suma lokalizacji innych niż uszkodzone; `damagedQty` = suma lokalizacji uszkodzonych (typ `DAMAGED` lub kod `USZKODZONE`).
+- Zmiana schematu wymaga podbicia `version`.
+
+Konsumentem jest aplikacja mag (`loc:stock-sync` / `GET /api/v1/loc-stock/*`); zapisuje snapshot we własnych tabelach `loc_stock_*` i nie zmienia swojego stanu magazynowego.
+
 ## Zmiany techniczne (2026-08)
 
 - Dodany typ lokalizacji **`WYSTAWA`**
