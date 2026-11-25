@@ -417,7 +417,26 @@ export async function applyMovement(input: MovementInput) {
   if (input.movementType === "ADD" && to) {
     const { model } = parseSkuModel(sku);
     if (model) {
-      await mergeLocationModelOrder(to, [model], input.operatorId);
+      try {
+        await mergeLocationModelOrder(to, [model], input.operatorId);
+      } catch (orderError) {
+        console.error("mergeLocationModelOrder after ADD failed", orderError);
+      }
+    }
+  }
+
+  let confirmedLocationQty: number | undefined;
+  const stockLocation =
+    input.movementType === "ADD" || input.movementType === "MOVE" ? to : input.movementType === "REMOVE" ? from : undefined;
+  if (stockLocation) {
+    const { data: currentRow, error: stockErr } = await supabase
+      .from("stock_current")
+      .select("qty")
+      .eq("location_code", stockLocation)
+      .eq("sku", sku)
+      .maybeSingle();
+    if (!stockErr) {
+      confirmedLocationQty = currentRow?.qty ?? 0;
     }
   }
 
@@ -431,6 +450,7 @@ export async function applyMovement(input: MovementInput) {
     fromLocationCode: data.from_location_code ?? undefined,
     toLocationCode: data.to_location_code ?? undefined,
     referenceNo: data.reference_no ?? undefined,
+    confirmedLocationQty,
   };
 }
 

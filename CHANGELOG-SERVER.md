@@ -6,6 +6,7 @@ Format: data (CET) — krótki opis zmiany na produkcji.
 
 - **Dodaj stan → podgląd:** po zapisie ADD lokalizacja i podświetlenie dodanych SKU zostają ustawione pod podgląd; stan odświeża się bez wyścigu z optymistyczną poprawką (loadData nie był odrzucany po edycji w podglądzie).
 - **Podgląd:** brakujący rozmiar (np. pierwsza sztuka `…-104` przy istniejącym modelu) widać po zeskanowaniu kodu; w edycji można dodać `+` bez trybu Dodaj.
+- **Zapis ADD:** usunięto fałszywy stan w UI; po każdym dodaniu weryfikacja stanu z API (`confirmedLocationQty` + ponowny odczyt `/api/stock`). Gdy zapis nie potwierdzi się w magazynie — komunikat błędu zamiast „Dodano”. Podgląd jawnie informuje, że skan produktu nie dodaje stanu.
 
 ## 2026-09-21
 

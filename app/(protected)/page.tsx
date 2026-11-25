@@ -24,6 +24,7 @@ import { parseSkuModel } from "@/lib/skuModel";
 import { createNativeQrDetector, decodeQrCanvas, drawVideoRoi, getInitialScanTier, getScanProfile, nextLowerScanTier } from "@/lib/qrScan";
 import { defaultLocationTypeForZone, formatLocationType, locationTypeLabels, zoneLabels } from "@/lib/locationMeta";
 import { summarizeScanQueue, groupQueueByModel } from "@/lib/skuModel";
+import { findUnconfirmedAdds, fetchStockRows, qtyAtLocation } from "@/lib/stockClientVerify";
 import { summarizeStockRows, modelQtyAtLocation } from "@/lib/stockViews";
 import { diffReconcileStock, reconcileDiffHasChanges } from "@/lib/reconcileDiff";
 import { buildLocationTypeMap } from "@/lib/stockClassification";
@@ -264,28 +265,6 @@ export default function Home() {
   const [manualLocError, setManualLocError] = useState<string | null>(null);
   const [quickLocationBusy, setQuickLocationBusy] = useState(false);
   const [quickLocationError, setQuickLocationError] = useState<string | null>(null);
-
-  const applyLocalStockAdds = useCallback((locationCode: string, lines: MoveQueueLine[]) => {
-    const loc = locationCode.trim().toUpperCase();
-    if (!loc || lines.length === 0) return;
-    setStock((prev) => {
-      let next = [...prev];
-      for (const line of lines) {
-        const sku = line.sku.trim().toUpperCase();
-        const addQty = Math.max(1, Math.floor(line.qty));
-        if (!sku) continue;
-        const idx = next.findIndex(
-          (row) => row.locationCode.toUpperCase() === loc && row.sku.toUpperCase() === sku,
-        );
-        if (idx >= 0) {
-          next = next.map((row, i) => (i === idx ? { ...row, qty: row.qty + addQty } : row));
-        } else {
-          next.push({ locationCode: loc, sku, qty: addQty });
-        }
-      }
-      return next;
-    });
-  }, []);
 
   const focusPreviewAfterStockAdd = useCallback((locationCode: string, lines: MoveQueueLine[]) => {
     const loc = locationCode.trim().toUpperCase();
@@ -1216,6 +1195,14 @@ export default function Home() {
       }
     }
 
+    let stockBefore: Awaited<ReturnType<typeof fetchStockRows>>;
+    try {
+      stockBefore = await fetchStockRows();
+    } catch (stockErr) {
+      setError(stockErr instanceof Error ? stockErr.message : "Nie udalo sie odczytac stanu przed zapisem.");
+      return;
+    }
+
     for (const line of queueSnapshot) {
       const response = await fetch("/api/movements", {
         method: "POST",
@@ -1233,7 +1220,26 @@ export default function Home() {
         setError(data.error ?? `Nie udalo sie zapisac SKU ${line.sku}`);
         return;
       }
+      if (!data.movement?.id) {
+        setError(`Brak potwierdzenia zapisu dla ${line.sku.trim().toUpperCase()} — stan mogl nie zostac zapisany.`);
+        return;
+      }
     }
+
+    let stockAfter: Awaited<ReturnType<typeof fetchStockRows>>;
+    try {
+      stockAfter = await fetchStockRows();
+    } catch (stockErr) {
+      setError(stockErr instanceof Error ? stockErr.message : "Nie udalo sie zweryfikowac stanu po zapisie.");
+      return;
+    }
+    const unconfirmed = findUnconfirmedAdds(to, queueSnapshot, stockBefore, stockAfter);
+    if (unconfirmed.length > 0) {
+      setError(`Stan nie zostal zapisany w magazynie: ${unconfirmed.join("; ")}. Sprobuj ponownie lub odswiez strone.`);
+      setStock(stockAfter);
+      return;
+    }
+
     const addSuccessText = formatAddSuccessMessage(to, queueSnapshot);
     setMessage(addSuccessText);
     pushScanToast(addSuccessText);
@@ -1253,7 +1259,7 @@ export default function Home() {
     setAddQueue([]);
     setSku("");
     addSkuOccurrenceRef.current.clear();
-    applyLocalStockAdds(to, queueSnapshot);
+    setStock(stockAfter);
     focusPreviewAfterStockAdd(to, queueSnapshot);
     await loadData();
     if (verifyPrompt) {
@@ -1416,19 +1422,40 @@ export default function Home() {
       setMessage(data.message ?? "Sugestia lokalizacji (bez zmiany stanu).");
       return;
     }
+    if (!data.movement?.id) {
+      setError("Brak potwierdzenia zapisu — stan mogl nie zostac zapisany.");
+      return;
+    }
 
     setSaleSourceOpen(false);
     if (payload.movementType === "ADD") {
       const loc = payload.toLocationCode?.trim().toUpperCase() ?? "";
       const skuNorm = payload.sku.trim().toUpperCase();
       const q = Math.max(1, Math.floor(payload.qty ?? 1));
+      const beforeQty = qtyAtLocation(stock, loc, skuNorm);
+      let stockAfter: Awaited<ReturnType<typeof fetchStockRows>>;
+      try {
+        stockAfter = await fetchStockRows();
+      } catch (stockErr) {
+        setError(stockErr instanceof Error ? stockErr.message : "Nie udalo sie zweryfikowac stanu po zapisie.");
+        return;
+      }
+      const afterQty = qtyAtLocation(stockAfter, loc, skuNorm);
+      const confirmedQty = data.movement?.confirmedLocationQty;
+      if (afterQty < beforeQty + q || (typeof confirmedQty === "number" && confirmedQty < beforeQty + q)) {
+        setError(
+          `Stan ${skuNorm} nie zapisal sie na ${loc} (bylo ${beforeQty}, jest ${afterQty}, oczekiwano +${q}).`,
+        );
+        setStock(stockAfter);
+        return;
+      }
+      setStock(stockAfter);
       const addText =
         q > 1
           ? `Dodano ${skuNorm} (${q} szt.) na lokalizację ${loc}.`
           : `Dodano kod ${skuNorm} na lokalizację ${loc}.`;
       setMessage(addText);
       pushScanToast(addText);
-      applyLocalStockAdds(loc, [{ sku: skuNorm, qty: q }]);
       focusPreviewAfterStockAdd(loc, [{ sku: skuNorm, qty: q }]);
     } else {
       setMessage(
@@ -1732,8 +1759,8 @@ export default function Home() {
           setMessage(`${skuNorm} na ${previewLocationCode}: ${qty} szt.`);
           setScannerStatus("Produkt na lokalizacji — skanuj kolejny kod.");
         } else {
-          setMessage(`${skuNorm} nie ma na ${previewLocationCode}.`);
-          setScannerStatus("Brak tego SKU tutaj — zeskanuj inny produkt lub lokalizacje.");
+          setMessage(`${skuNorm} nie ma na ${previewLocationCode}. Podglad nie dodaje stanu — uzyj trybu Dodaj stan.`);
+          setScannerStatus("Brak SKU — aby dodac sztuke, przejdz do Dodaj stan albo wcisnij + w edycji podgladu.");
         }
         return;
       }
@@ -2905,8 +2932,8 @@ export default function Home() {
                   locationTypes={locationTypeMap}
                   highlightSku={previewHighlightSku}
                   filterModels={previewFilterModels.length > 0 ? previewFilterModels : undefined}
-                  onStockChanged={() => {
-                    void loadData();
+                  onStockChanged={async () => {
+                    await loadData();
                   }}
                 />
               </section>
@@ -3604,8 +3631,8 @@ export default function Home() {
           stock={stock}
           locations={locations}
           onClose={() => setStockOpen(false)}
-          onStockChanged={() => {
-            void loadData();
+          onStockChanged={async () => {
+            await loadData();
           }}
           onOpenLocationPreview={(locationCode, models) => {
             setStockOpen(false);

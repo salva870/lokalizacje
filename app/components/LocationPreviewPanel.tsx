@@ -70,7 +70,7 @@ type LocationPreviewPanelProps = {
   highlightSku?: string | null;
   /** Pokaz tylko wybrane modele (np. po dodaniu stanu). */
   filterModels?: string[];
-  onStockChanged?: (patch?: { locationCode: string; sku: string; qty: number }) => void;
+  onStockChanged?: () => void | Promise<void>;
 };
 
 export function LocationPreviewPanel({
@@ -279,14 +279,29 @@ export function LocationPreviewPanel({
         if (!response.ok) {
           throw new Error(typeof data.error === "string" ? data.error : "Nie udalo sie zapisac zmiany.");
         }
+        if (!data.movement?.id) {
+          throw new Error("Brak potwierdzenia zapisu — odswiez strone i sprobuj ponownie.");
+        }
+        const isRemove = delta === "remove" || (typeof delta === "number" && delta < 0);
+        if (!isRemove && typeof delta === "number" && delta > 0) {
+          const expectedMin = currentQty + addQty;
+          const confirmed = data.movement?.confirmedLocationQty;
+          if (typeof confirmed === "number" && confirmed < expectedMin) {
+            throw new Error(
+              `Zapis nie potwierdzony (${confirmed} szt. na lokalizacji zamiast oczekiwanych ${expectedMin}).`,
+            );
+          }
+        }
+        await onStockChanged?.();
         const nextQty =
-          delta === "remove" || (typeof delta === "number" && delta < 0)
+          isRemove
             ? Math.max(0, currentQty - qtyToRemove)
-            : currentQty + addQty;
+            : typeof data.movement?.confirmedLocationQty === "number"
+              ? data.movement.confirmedLocationQty
+              : currentQty + addQty;
         setSaveMessage(
           nextQty <= 0 ? `Zdjeto ostatnia sztuke ${sku}.` : delta === -1 ? `Zdjeto 1 szt.` : `Dodano 1 szt.`,
         );
-        onStockChanged?.({ locationCode, sku, qty: nextQty });
         const orderedModels = modelGroups.map((group) => group.model);
         const remainingModelQty =
           (modelGroups.find((group) => group.model === model)?.totalQty ?? 0) +
