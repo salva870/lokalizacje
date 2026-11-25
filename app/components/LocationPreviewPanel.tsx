@@ -405,10 +405,21 @@ export function LocationPreviewPanel({
           const groupHasHighlight =
             Boolean(highlightNorm) && group.lines.some((line) => line.sku.toUpperCase() === highlightNorm);
           const groupIsFiltered = filterModelSet.has(group.model.toUpperCase());
+          const highlightBelongsToGroup =
+            Boolean(highlightNorm) && parseSkuModel(highlightNorm).model === group.model.toUpperCase();
+          const highlightMissingFromGroup = highlightBelongsToGroup && !groupHasHighlight;
           const sizesExpanded = expandedSizesModels.has(group.model) || groupHasHighlight || groupIsFiltered;
           /** Podglad: pokaz wszystkie rozmiary — ukrywanie 2 pierwszych powodowalo „brak stanu” przy istniejacym SKU. */
           const visibleLines = !reorderOpen ? group.lines : [];
           const hiddenSizeCount = 0;
+          const highlightQty = highlightMissingFromGroup
+            ? Math.max(
+                0,
+                stockAsRows.find(
+                  (row) => row.sku.toUpperCase() === highlightNorm && row.locationCode.toUpperCase() === locationCode.toUpperCase(),
+                )?.qty ?? 0,
+              )
+            : 0;
 
           return (
             <li
@@ -492,6 +503,33 @@ export function LocationPreviewPanel({
                   {!reorderOpen && visibleLines.length > 0 ? (
                     <div className={`relative mt-2 ${hiddenSizeCount > 0 || (sizesExpanded && group.lines.length > 2) ? "pb-5" : ""}`}>
                       <ul className="space-y-1">
+                        {highlightMissingFromGroup ? (
+                          <li
+                            className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border px-2 py-1.5 text-xs ${
+                              highlightQty > 0
+                                ? "border-amber-400 bg-amber-50 ring-1 ring-amber-300"
+                                : "border-dashed border-amber-300 bg-amber-50/60"
+                            }`}
+                          >
+                            <span className="font-mono text-blue-900">
+                              rozmiar {parseSkuModel(highlightNorm).size || highlightNorm}
+                            </span>
+                            {editMode ? (
+                              <button
+                                type="button"
+                                className="inline-flex h-8 min-w-8 items-center justify-center rounded-lg border border-indigo-300 bg-white px-2 text-base font-bold text-indigo-900 disabled:opacity-40"
+                                disabled={Boolean(stockBusyKey)}
+                                onClick={() => void changeSkuQty(highlightNorm, highlightQty, group.model, 1)}
+                              >
+                                +
+                              </button>
+                            ) : (
+                              <span className="text-xs font-semibold text-amber-900">
+                                {highlightQty > 0 ? `${highlightQty} szt.` : "Brak — użyj Dodaj stan"}
+                              </span>
+                            )}
+                          </li>
+                        ) : null}
                         {visibleLines.map((line) => {
                           const lineKey = `${locationCode}:${line.sku}`;
                           const lineBusy = stockBusyKey === lineKey;

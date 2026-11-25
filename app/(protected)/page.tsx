@@ -31,6 +31,11 @@ import { resolveSaleLineLocation, type SaleQueueLine } from "@/lib/saleQueue";
 import { formatAddSuccessMessage } from "@/lib/formatAddSummary";
 import type { ReplenishmentPlan } from "@/lib/replenishment";
 import { ReplenishmentRoutePlanCard } from "@/app/components/ReplenishmentRoutePlanCard";
+import {
+  buildMoveResultSummary,
+  MoveResultSummaryCard,
+  type MoveResultSummary,
+} from "@/app/components/MoveResultSummaryCard";
 import { groupReplenishmentRoutes, type ReplenishmentRouteSuggestion } from "@/lib/replenishmentRoutes";
 import type { LocationType, Zone } from "@/lib/types";
 
@@ -170,6 +175,7 @@ export default function Home() {
   const [replenishPlanLoading, setReplenishPlanLoading] = useState(false);
   const [replenishInventoryOpen, setReplenishInventoryOpen] = useState(false);
   const [activeReplenishRoute, setActiveReplenishRoute] = useState<ReplenishmentRouteSuggestion | null>(null);
+  const [moveResultSummary, setMoveResultSummary] = useState<MoveResultSummary | null>(null);
 
   const [addVerifyPrompt, setAddVerifyPrompt] = useState<{
     locationCode: string;
@@ -259,16 +265,42 @@ export default function Home() {
   const [quickLocationBusy, setQuickLocationBusy] = useState(false);
   const [quickLocationError, setQuickLocationError] = useState<string | null>(null);
 
-  const patchStockQty = useCallback((patch: { locationCode: string; sku: string; qty: number }) => {
-    stockLoadSeqRef.current += 1;
-    const loc = patch.locationCode.trim().toUpperCase();
-    const sku = patch.sku.trim().toUpperCase();
-    const qty = Math.max(0, Math.floor(Number(patch.qty) || 0));
+  const applyLocalStockAdds = useCallback((locationCode: string, lines: MoveQueueLine[]) => {
+    const loc = locationCode.trim().toUpperCase();
+    if (!loc || lines.length === 0) return;
     setStock((prev) => {
-      const rest = prev.filter((row) => row.locationCode.toUpperCase() !== loc || row.sku.toUpperCase() !== sku);
-      if (qty <= 0) return rest;
-      return [...rest, { locationCode: loc, sku, qty }];
+      let next = [...prev];
+      for (const line of lines) {
+        const sku = line.sku.trim().toUpperCase();
+        const addQty = Math.max(1, Math.floor(line.qty));
+        if (!sku) continue;
+        const idx = next.findIndex(
+          (row) => row.locationCode.toUpperCase() === loc && row.sku.toUpperCase() === sku,
+        );
+        if (idx >= 0) {
+          next = next.map((row, i) => (i === idx ? { ...row, qty: row.qty + addQty } : row));
+        } else {
+          next.push({ locationCode: loc, sku, qty: addQty });
+        }
+      }
+      return next;
     });
+  }, []);
+
+  const focusPreviewAfterStockAdd = useCallback((locationCode: string, lines: MoveQueueLine[]) => {
+    const loc = locationCode.trim().toUpperCase();
+    if (!loc) return;
+    setActiveLocationCode(loc);
+    setToLocationCode(loc);
+    const models = [
+      ...new Set(lines.map((line) => parseSkuModel(line.sku.trim().toUpperCase()).model).filter(Boolean)),
+    ];
+    setPreviewFilterModels(models);
+    if (lines.length === 1) {
+      setPreviewHighlightSku(lines[0]!.sku.trim().toUpperCase());
+    } else if (models.length === 1) {
+      setPreviewHighlightSku(null);
+    }
   }, []);
 
   async function loadData(includeDraft = false) {
@@ -676,6 +708,7 @@ export default function Home() {
       setMoveTargetOpen(false);
       setMoveTargetSelectedCode(null);
       setActiveReplenishRoute(null);
+      setMoveResultSummary(null);
     }
     if (next === "ADD" || next === "RECONCILE") {
       setFromLocationCode("");
@@ -741,10 +774,10 @@ export default function Home() {
   }, [ready, operationMode, loadReplenishmentRoutes]);
 
   const openLocationPreview = useCallback(
-    (locationCode: string, models?: string[]) => {
+    (locationCode: string, models?: string[], highlightSku?: string | null) => {
       const code = locationCode.trim().toUpperCase();
       if (!code) return;
-      setPreviewHighlightSku(null);
+      setPreviewHighlightSku(highlightSku?.trim().toUpperCase() ?? null);
       setPreviewFilterModels(
         models && models.length > 0 ? models.map((model) => model.trim().toUpperCase()).filter(Boolean) : [],
       );
@@ -1042,6 +1075,22 @@ export default function Home() {
     window.requestAnimationFrame(() => window.requestAnimationFrame(run));
   }, [moveTargetOpen, moveDestinationStripItems.length, activeLocationCode]);
 
+  /** Po przeniesieniu: świeży stan → podsumowanie tego, ile sztuk jest teraz na DO. */
+  async function captureMoveResultSummary(
+    from: string,
+    to: string,
+    movedLines: Array<{ sku: string; qty: number }>,
+  ) {
+    try {
+      const response = await fetch("/api/stock", { cache: "no-store" });
+      if (!response.ok) return;
+      const data = await response.json();
+      setMoveResultSummary(buildMoveResultSummary(data.stock ?? [], from, to, movedLines));
+    } catch {
+      // Podsumowanie jest pomocnicze — błąd sieci nie cofa przeniesienia.
+    }
+  }
+
   async function confirmMoveToTarget() {
     const { from } = resolveMoveEndpoints();
     const to = moveTargetSelectedCode?.trim().toUpperCase();
@@ -1049,9 +1098,13 @@ export default function Home() {
     if (moveTargetMode === "queue" && moveQueue.length === 0) return;
     setError(null);
     setMessage(null);
+    setMoveResultSummary(null);
     setMoveBatchBusy(true);
     try {
       if (moveTargetMode === "entire") {
+        const movedLinesEntire = stock
+          .filter((row) => row.locationCode.trim().toUpperCase() === from && row.qty > 0)
+          .map((row) => ({ sku: row.sku, qty: row.qty }));
         const response = await fetch(`/api/locations/${encodeURIComponent(from)}/move`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1074,6 +1127,7 @@ export default function Home() {
         setMoveTargetMode("queue");
         clearActiveLocationAfterSave();
         await loadData();
+        await captureMoveResultSummary(from, to, movedLinesEntire);
         return;
       }
 
@@ -1113,6 +1167,7 @@ export default function Home() {
       setMoveTargetMode("queue");
       clearActiveLocationAfterSave();
       await loadData();
+      await captureMoveResultSummary(from, to, queueSnapshot);
     } finally {
       setMoveBatchBusy(false);
     }
@@ -1198,7 +1253,8 @@ export default function Home() {
     setAddQueue([]);
     setSku("");
     addSkuOccurrenceRef.current.clear();
-    clearActiveLocationAfterSave();
+    applyLocalStockAdds(to, queueSnapshot);
+    focusPreviewAfterStockAdd(to, queueSnapshot);
     await loadData();
     if (verifyPrompt) {
       setAddVerifyPrompt(verifyPrompt);
@@ -1372,6 +1428,8 @@ export default function Home() {
           : `Dodano kod ${skuNorm} na lokalizację ${loc}.`;
       setMessage(addText);
       pushScanToast(addText);
+      applyLocalStockAdds(loc, [{ sku: skuNorm, qty: q }]);
+      focusPreviewAfterStockAdd(loc, [{ sku: skuNorm, qty: q }]);
     } else {
       setMessage(
         payload.movementType === "MOVE_TO_SALE" || payload.movementType === "SALE_FINALIZE"
@@ -1773,7 +1831,9 @@ export default function Home() {
             setScannerStatus("Lokalizacja docelowa ustawiona — mozesz zatwierdzic przeniesienie.");
           }
         } else if (operationMode === "PREVIEW") {
+          // Skan kodu lokalizacji = chce zobaczyć całą zawartość; zdejmij filtr modeli ustawiony wcześniej (np. „sprawdz”).
           setPreviewHighlightSku(null);
+          setPreviewFilterModels([]);
           setActiveLocationCode(resolvedLocation);
           setToLocationCode(resolvedLocation);
           setMessage(`Podglad lokalizacji: ${resolvedLocation}`);
@@ -2325,6 +2385,10 @@ export default function Home() {
             } else {
               setActiveLocationCode(null);
               setToLocationCode("");
+              if (operationMode === "PREVIEW") {
+                setPreviewFilterModels([]);
+                setPreviewHighlightSku(null);
+              }
             }
           }}
           title={operationMode === "MOVE" ? "Kliknij, aby wyczyscic lokalizacje DO" : "Kliknij, aby wyczyscic aktywna lokalizacje"}
@@ -2431,6 +2495,12 @@ export default function Home() {
               >
                 Nowa lokalizacja
               </button>
+            ) : null}
+
+            {operationMode === "MOVE" && moveResultSummary ? (
+              <div className="mt-4">
+                <MoveResultSummaryCard summary={moveResultSummary} onDismiss={() => setMoveResultSummary(null)} />
+              </div>
             ) : null}
 
             {operationMode === "MOVE" ? (
@@ -2835,8 +2905,7 @@ export default function Home() {
                   locationTypes={locationTypeMap}
                   highlightSku={previewHighlightSku}
                   filterModels={previewFilterModels.length > 0 ? previewFilterModels : undefined}
-                  onStockChanged={(patch) => {
-                    if (patch) patchStockQty(patch);
+                  onStockChanged={() => {
                     void loadData();
                   }}
                 />
@@ -3374,7 +3443,8 @@ export default function Home() {
                 onClick={() => {
                   const prompt = addVerifyPrompt;
                   setAddVerifyPrompt(null);
-                  openLocationPreview(prompt.locationCode, [prompt.model]);
+                  const highlight = prompt.addedSkus[0]?.sku?.trim().toUpperCase() ?? null;
+                  openLocationPreview(prompt.locationCode, [prompt.model], highlight);
                 }}
               >
                 sprawdz
@@ -3534,8 +3604,7 @@ export default function Home() {
           stock={stock}
           locations={locations}
           onClose={() => setStockOpen(false)}
-          onStockChanged={(patch) => {
-            if (patch) patchStockQty(patch);
+          onStockChanged={() => {
             void loadData();
           }}
           onOpenLocationPreview={(locationCode, models) => {

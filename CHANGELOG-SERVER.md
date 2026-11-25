@@ -2,6 +2,11 @@
 
 Format: data (CET) — krótki opis zmiany na produkcji.
 
+## 2026-11-25
+
+- **Dodaj stan → podgląd:** po zapisie ADD lokalizacja i podświetlenie dodanych SKU zostają ustawione pod podgląd; stan odświeża się bez wyścigu z optymistyczną poprawką (loadData nie był odrzucany po edycji w podglądzie).
+- **Podgląd:** brakujący rozmiar (np. pierwsza sztuka `…-104` przy istniejącym modelu) widać po zeskanowaniu kodu; w edycji można dodać `+` bez trybu Dodaj.
+
 ## 2026-09-21
 
 - **ADD:** po zapisie widoczny kod SKU (komunikat, toast, warstwa weryfikacji modelu).
